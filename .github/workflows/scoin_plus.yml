@@ -1,64 +1,30 @@
-name: S-COIN+ Snapshots
+name: Run S-COIN+ intraday
 
 permissions:
   contents: write
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 1-5"    # JST 09:00
-    - cron: "30 2 * * 1-5"   # JST 11:30
-    - cron: "30 6 * * 1-5"   # JST 15:30
+    - cron: "35 6 * * *"   # 毎日 15:35 JST
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-
+      - run: pip install -r requirements.txt
       - name: Run S-COIN+ intraday
+        run: python src/scoin_plus_intraday.py
+      - name: Commit and push outputs
         run: |
-          python src/scoin_plus_intraday.py
-
-      - name: Verify outputs exist
-        run: |
-          echo "=== ls docs/outputs ==="
-          ls -la docs/outputs || true
-          test -f docs/outputs/scoin_plus_intraday.png || \
-          test -f docs/outputs/scoin_plus_intraday.csv || \
-          test -f docs/outputs/scoin_plus_post.txt
-
-      - name: Upload artifacts (debug)
-        uses: actions/upload-artifact@v4
-        with:
-          name: scoin-plus-outputs
-          path: docs/outputs/*
-
-      - name: Commit and push results
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/* || true
-          echo "=== git status ==="
-          git status
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add docs/outputs/*
           if ! git diff --cached --quiet; then
-            git commit -m "Auto update: S-COIN+ outputs $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+            git commit -m "Update S-COIN+ intraday snapshot"
             git push
-            echo "pushed ✅"
-          else
-            echo "No changes to commit."
           fi
