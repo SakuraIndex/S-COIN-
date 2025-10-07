@@ -39,12 +39,23 @@ def safe_close_series(df: pd.DataFrame) -> pd.Series:
     """DataFrameからClose列を安全にSeries化"""
     if df is None or df.empty:
         return pd.Series(dtype=float)
+
     close = df.get("Close", None)
     if close is None:
         return pd.Series(dtype=float)
-    if not isinstance(close, pd.Series):
-        close = pd.Series(close, index=df.index)
-    s = pd.to_numeric(close, errors="coerce").dropna()
+
+    # --- ここが重要：多次元 → 1次元へ強制変換 ---
+    if hasattr(close, "values"):
+        close = close.values.squeeze()  # (n,1) → (n,)
+    # ----------------------------------------------
+
+    # Series化（indexを持たない場合も対応）
+    try:
+        s = pd.Series(close, index=df.index)
+    except Exception:
+        s = pd.Series(close)
+
+    s = pd.to_numeric(s, errors="coerce").dropna()
     try:
         s.index = pd.DatetimeIndex(s.index).tz_localize(None)
     except Exception:
