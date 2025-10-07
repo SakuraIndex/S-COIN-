@@ -9,7 +9,7 @@ import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-# ===== 銘柄一覧（確認済みコードに修正済） =====
+# ===== 銘柄一覧 =====
 TICKERS = {
     "MetaPlanet": "3350.T",
     "リミックスポイント": "3825.T",
@@ -42,7 +42,6 @@ def safe_close_series(df: pd.DataFrame) -> pd.Series:
     close = df.get("Close", None)
     if close is None:
         return pd.Series(dtype=float)
-    # ndarray や list の場合もSeriesに包む
     if not isinstance(close, pd.Series):
         close = pd.Series(close, index=df.index)
     s = pd.to_numeric(close, errors="coerce").dropna()
@@ -54,14 +53,14 @@ def safe_close_series(df: pd.DataFrame) -> pd.Series:
 
 
 def fetch_prev_close(ticker: str):
-    """前日終値を取得"""
-    df = yf.download(ticker, period="10d", interval="1d", progress=False)
-    if df is None or df.empty:
+    """前日終値を取得（安全化）"""
+    df = yf.download(ticker, period="10d", interval="1d", progress=False, auto_adjust=False, prepost=False)
+    s = safe_close_series(df)
+    if s.empty:
         return None
-    closes = pd.to_numeric(df["Close"], errors="coerce").dropna()
-    if len(closes) < 2:
-        return float(closes.iloc[-1]) if len(closes) > 0 else None
-    return float(closes.iloc[-2])
+    if len(s) >= 2:
+        return float(s.iloc[-2])
+    return float(s.iloc[-1])
 
 
 def fetch_intraday_series(ticker: str):
