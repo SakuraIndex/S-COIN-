@@ -2,16 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Generate long-term charts (1d/7d/1m/1y) for Sakura Index series.
-- 市場セッション/タイムゾーンは INDEX_KEY で切替
-- 1d: 始値<終値=青緑 / 始値>終値=赤 / 同値=グレー
-- 出来高があれば重ね描き
-- 空でも「No data」を取引時間枠で保存（PNGは必ず更新）
-出力: docs/outputs/<slug>_{1d|7d|1m|1y}.png
 """
 
 import os, re
 from datetime import timedelta
-from typing import Union
+from typing import Union, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -42,15 +37,8 @@ def log(msg: str):
 
 # ---------------- Slug 正規化 ----------------
 def norm_slug(s: str) -> str:
-    """
-    リポの実ファイル命名に合わせる:
-    - ハイフンは「削除」 (例: S-COIN+ → scoin_plus)
-    - プラスは "_plus"
-    - スペースは "_"
-    - 連続アンダースコアは1つに
-    """
     s = (s or "").strip().lower()
-    s = s.replace("-", "")            # ここがポイント（以前は '_' にしていた）
+    s = s.replace("-", "")          # S-COIN+ → scoin_plus
     s = s.replace("+", "_plus")
     s = s.replace(" ", "_")
     s = re.sub(r"_+", "_", s)
@@ -58,63 +46,51 @@ def norm_slug(s: str) -> str:
 
 # ---------------- 市場プロファイル ----------------
 def market_profile(index_key: str) -> dict:
-    k = (index_key or "").lower()
-    if k in ("ain10", "ain-10", "astra4"):
+    k=(index_key or "").lower()
+    if k in ("ain10","ain-10","astra4"):
         return dict(RAW_TZ_INTRADAY="America/New_York",
                     RAW_TZ_HISTORY="Asia/Tokyo",
                     DISPLAY_TZ="Asia/Tokyo",
                     SESSION_TZ="America/New_York",
-                    SESSION_START=(9,30),
-                    SESSION_END=(16,0))
-    if k in ("scoin+", "scoin_plus", "scoinplus", "s-coin+"):
+                    SESSION_START=(9,30), SESSION_END=(16,0))
+    if k in ("scoin+","scoin_plus","scoinplus","s-coin+"):
         return dict(RAW_TZ_INTRADAY="Asia/Tokyo",
                     RAW_TZ_HISTORY="Asia/Tokyo",
                     DISPLAY_TZ="Asia/Tokyo",
                     SESSION_TZ="Asia/Tokyo",
-                    SESSION_START=(9,0),
-                    SESSION_END=(15,30))
+                    SESSION_START=(9,0), SESSION_END=(15,30))
     if k in ("rbank9","r-bank9","r_bank9"):
         return dict(RAW_TZ_INTRADAY="Asia/Tokyo",
                     RAW_TZ_HISTORY="Asia/Tokyo",
                     DISPLAY_TZ="Asia/Tokyo",
                     SESSION_TZ="Asia/Tokyo",
-                    SESSION_START=(9,0),
-                    SESSION_END=(15,0))
+                    SESSION_START=(9,0), SESSION_END=(15,0))
     return dict(RAW_TZ_INTRADAY="Asia/Tokyo",
                 RAW_TZ_HISTORY="Asia/Tokyo",
                 DISPLAY_TZ="Asia/Tokyo",
                 SESSION_TZ="Asia/Tokyo",
-                SESSION_START=(9,0),
-                SESSION_END=(15,0))
+                SESSION_START=(9,0), SESSION_END=(15,0))
 
 # ---------------- 入出力 ----------------
 def _first(paths):
     for p in paths:
-        if os.path.exists(p):
-            return p
+        if os.path.exists(p): return p
     return None
 
 def alt_candidates(slug: str):
-    """
-    レガシー/表記ゆれも拾う:
-      - slug そのまま
-      - 全アンダースコア除去
-      - "_plus" → "plus"
-    """
-    cand = {slug, slug.replace("_",""), slug.replace("_plus","plus")}
-    return list(cand)
+    return list({slug, slug.replace("_",""), slug.replace("_plus","plus")})
 
 def find_intraday(base, slug):
-    cands = []
+    c=[]
     for s in alt_candidates(slug):
-        cands += [f"{base}/{s}_intraday.csv", f"{base}/{s}_intraday.txt"]
-    return _first(cands)
+        c += [f"{base}/{s}_intraday.csv", f"{base}/{s}_intraday.txt"]
+    return _first(c)
 
 def find_history(base, slug):
-    cands = []
+    c=[]
     for s in alt_candidates(slug):
-        cands += [f"{base}/{s}_history.csv", f"{base}/{s}_history.txt"]
-    return _first(cands)
+        c += [f"{base}/{s}_history.csv", f"{base}/{s}_history.txt"]
+    return _first(c)
 
 def parse_time_any(x, raw_tz: str, display_tz: str) -> Union[pd.Timestamp, pd.NaT]:
     if pd.isna(x): return pd.NaT
@@ -143,25 +119,25 @@ def read_any(path, raw_tz, display_tz):
     if not path:
         return pd.DataFrame(columns=["time","value","volume"])
     df = pd.read_csv(path)
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.columns=[str(c).strip().lower() for c in df.columns]
+
     tcol=None
     for name in ["datetime","time","timestamp","date"]:
-        if name in df.columns:
-            tcol=name; break
+        if name in df.columns: tcol=name; break
     if not tcol:
         fuzzy=[c for c in df.columns if ("time" in c) or ("date" in c)]
         tcol=fuzzy[0] if fuzzy else None
     if not tcol:
         raise KeyError(f"No time-like column found. columns={list(df.columns)}")
-    vcol=pick_value_col(df)
-    volcol=pick_volume_col(df)
+
+    vcol=pick_value_col(df); volcol=pick_volume_col(df)
 
     out=pd.DataFrame()
     out["time"]=df[tcol].apply(lambda x: parse_time_any(x, raw_tz, display_tz))
     out["value"]=pd.to_numeric(df[vcol], errors="coerce")
     out["volume"]=pd.to_numeric(df[volcol], errors="coerce") if volcol else 0
     out=out.dropna(subset=["time","value"]).sort_values("time").reset_index(drop=True)
-    log(f"read_any: rows={len(out)} path={path}")
+    log(f"read_any: rows={len(out)} path={path}  time_range={out['time'].min()}..{out['time'].max() if not out.empty else None}")
     return out
 
 def to_daily(df, display_tz):
@@ -172,27 +148,27 @@ def to_daily(df, display_tz):
     g["time"]=pd.to_datetime(g["date"]).dt.tz_localize(display_tz)
     return g[["time","value","volume"]]
 
-# ---------------- スケール補正 ----------------
+# ---------------- スケール補正（%→絶対） ----------------
 def _try_load_last_close(slug, daily_all):
     v=os.environ.get("LAST_CLOSE","").strip()
     if v:
         try:
             x=float(v)
-            if x>0: log(f"last_close from env: {x}"); return x
+            if x>0: return x
         except: pass
     base_path=os.path.join(OUTPUT_DIR, f"{slug}_base.txt")
     if os.path.exists(base_path):
         try:
             with open(base_path,"r",encoding="utf-8") as f:
                 x=float(f.read().strip())
-            if x>0: log(f"last_close from base file: {x}"); return x
+            if x>0: return x
         except: pass
     if daily_all is not None and not daily_all.empty:
         try:
             x=float(pd.to_numeric(daily_all["value"],errors="coerce").dropna().iloc[-1])
-            if x>50: log(f"last_close from daily_all: {x}"); return x
+            if x>50: return x
         except: pass
-    log("last_close not found"); return None
+    return None
 
 def normalize_intraday_scale(intraday, daily_all, slug):
     if intraday.empty: return intraday
@@ -201,16 +177,13 @@ def normalize_intraday_scale(intraday, daily_all, slug):
     max_abs=float(s.abs().max())
     is_decimal_pct = max_abs <= 0.2
     is_pct         = max_abs <= 5.0
-    if not (is_decimal_pct or is_pct):
-        log("normalize: looks absolute already; skip"); return intraday
+    if not (is_decimal_pct or is_pct): return intraday
     last_close=_try_load_last_close(slug, daily_all)
-    if last_close is None:
-        log("normalize skipped (no last_close)"); return intraday
+    if last_close is None: return intraday
     pct = s * (100.0 if is_decimal_pct else 1.0)
     abs_val = last_close * (1.0 + pct/100.0)
     out=intraday.copy(); out["value"]=abs_val
-    log(f"normalized %→abs using last_close={last_close:.4f} "
-        f"({'decimal-pct' if is_decimal_pct else 'pct'})")
+    log(f"normalized %→abs using last_close={last_close}")
     return out
 
 # ---------------- 軸/描画 ----------------
@@ -237,12 +210,18 @@ def session_frame_on_display(base_ts, session_tz, display_tz, start_hm, end_hm):
     end  =pd.Timestamp(d.year,d.month,d.day,end_hm[0],end_hm[1], tz=session_tz)
     return start.tz_convert(display_tz), end.tz_convert(display_tz)
 
+def session_frame_by_date(display_tz, session_tz, y,m,d, start_hm, end_hm):
+    start=pd.Timestamp(y,m,d,start_hm[0],start_hm[1], tz=session_tz).tz_convert(display_tz)
+    end  =pd.Timestamp(y,m,d,end_hm[0],end_hm[1], tz=session_tz).tz_convert(display_tz)
+    return start, end
+
 def today_session_frame(display_tz, session_tz, start_hm, end_hm):
     now = pd.Timestamp.now(tz=display_tz).tz_convert(session_tz)
-    d=now.date()
-    start=pd.Timestamp(d.year,d.month,d.day,start_hm[0],start_hm[1], tz=session_tz)
-    end  =pd.Timestamp(d.year,d.month,d.day,end_hm[0],end_hm[1], tz=session_tz)
-    return start.tz_convert(display_tz), end.tz_convert(display_tz)
+    return session_frame_by_date(display_tz, session_tz, now.year, now.month, now.day, start_hm, end_hm)
+
+def previous_session_frame(display_tz, session_tz, start_hm, end_hm):
+    now = pd.Timestamp.now(tz=display_tz).tz_convert(session_tz) - pd.Timedelta(days=1)
+    return session_frame_by_date(display_tz, session_tz, now.year, now.month, now.day, start_hm, end_hm)
 
 def ensure_saved(fig, outpath):
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
@@ -253,20 +232,13 @@ def plot_df(df, slug, label, mode, tz, frame=None, placeholder_frame=None):
     outpath = f"{OUTPUT_DIR}/{slug}_{label}.png"
 
     if df.empty:
-        log(f"plot_df: empty => placeholder saved ({slug}_{label})")
-        fig, ax = plt.subplots(figsize=(9.5, 4.8))
+        fig, ax = plt.subplots(figsize=(9.5,4.8))
         ax.grid(True, alpha=0.3)
         ax.set_title(f"{slug.upper()} ({label})", color="#ffb6c1")
-        ax.set_xlabel("Time" if mode=="1d" else "Date")
-        ax.set_ylabel("Index Value")
-        # 時間軸だけでも正しく見せる
-        if placeholder_frame is not None:
-            ax.set_xlim(placeholder_frame)
-            format_time_axis(ax, mode, tz)
-        ax.text(0.5, 0.5, "No data", color="#b8c2e0",
-                ha="center", va="center", transform=ax.transAxes, fontsize=16)
-        ensure_saved(fig, outpath)
-        return
+        ax.set_xlabel("Time" if mode=="1d" else "Date"); ax.set_ylabel("Index Value")
+        if placeholder_frame: ax.set_xlim(placeholder_frame); format_time_axis(ax, mode, tz)
+        ax.text(0.5,0.5,"No data", color="#b8c2e0", ha="center", va="center", transform=ax.transAxes, fontsize=16)
+        ensure_saved(fig, outpath); return
 
     if mode=="1d":
         open_p, close_p = df["value"].iloc[0], df["value"].iloc[-1]
@@ -275,7 +247,7 @@ def plot_df(df, slug, label, mode, tz, frame=None, placeholder_frame=None):
     else:
         color_line, lw = COLOR_PRICE_DEFAULT, 1.8
 
-    fig, ax1 = plt.subplots(figsize=(9.5, 4.8))
+    fig, ax1 = plt.subplots(figsize=(9.5,4.8))
     ax1.grid(True, alpha=0.3)
 
     if "volume" in df and pd.to_numeric(df["volume"], errors="coerce").abs().sum()>0:
@@ -285,8 +257,7 @@ def plot_df(df, slug, label, mode, tz, frame=None, placeholder_frame=None):
 
     ax1.plot(df["time"], df["value"], color=color_line, lw=lw, solid_capstyle="round", zorder=3)
     ax1.set_title(f"{slug.upper()} ({label})", color="#ffb6c1")
-    ax1.set_xlabel("Time" if mode=="1d" else "Date")
-    ax1.set_ylabel("Index Value")
+    ax1.set_xlabel("Time" if mode=="1d" else "Date"); ax1.set_ylabel("Index Value")
 
     format_time_axis(ax1, mode, tz)
     apply_y_padding(ax1, df["value"])
@@ -294,53 +265,65 @@ def plot_df(df, slug, label, mode, tz, frame=None, placeholder_frame=None):
 
     ensure_saved(fig, outpath)
 
+# ---------------- 1d 窓のフォールバック選定 ----------------
+def best_1d_window(intraday: pd.DataFrame, MP: dict) -> Tuple[pd.DataFrame, Optional[Tuple[pd.Timestamp,pd.Timestamp]], Tuple[pd.Timestamp,pd.Timestamp]]:
+    disp_tz=MP["DISPLAY_TZ"]; sess_tz=MP["SESSION_TZ"]
+    start_today, end_today = today_session_frame(disp_tz, sess_tz, MP["SESSION_START"], MP["SESSION_END"])
+    placeholder=(start_today, end_today)
+
+    if intraday.empty:
+        return pd.DataFrame(), None, placeholder
+
+    # 候補: 末尾日 / きょう / 前営業日
+    candidates=[]
+    last_ts = intraday["time"].max()
+    start1, end1 = session_frame_on_display(last_ts, sess_tz, disp_tz, MP["SESSION_START"], MP["SESSION_END"])
+    candidates.append(("last-day", start1, end1))
+
+    candidates.append(("today", start_today, end_today))
+    start_prev, end_prev = previous_session_frame(disp_tz, sess_tz, MP["SESSION_START"], MP["SESSION_END"])
+    candidates.append(("prev", start_prev, end_prev))
+
+    for tag, a, b in candidates:
+        sub = intraday[(intraday["time"]>=a) & (intraday["time"]<=b)]
+        log(f"1d candidate={tag} rows={len(sub)} window=[{a}..{b}]")
+        if len(sub)>=5:    # 最低5点
+            return sub.copy(), (a,b), placeholder
+
+    # 直近 N 本で妥協（時間枠＝実データ範囲）
+    N=200
+    tail = intraday.tail(N).copy()
+    if not tail.empty:
+        frame=(tail["time"].min(), tail["time"].max())
+        log(f"1d fallback tail rows={len(tail)} frame={frame}")
+        return tail, frame, placeholder
+
+    return pd.DataFrame(), None, placeholder
+
 # ---------------- メイン ----------------
 def main():
-    index_key = os.environ.get("INDEX_KEY","").strip()
+    index_key=os.environ.get("INDEX_KEY","").strip()
     if not index_key: raise SystemExit("ERROR: INDEX_KEY not set")
-    slug = norm_slug(index_key)
-    MP = market_profile(index_key)
+    slug=norm_slug(index_key)
+    MP=market_profile(index_key)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    intraday_path = find_intraday(OUTPUT_DIR, slug)
-    history_path  = find_history(OUTPUT_DIR, slug)
+    intraday_path=find_intraday(OUTPUT_DIR, slug)
+    history_path =find_history (OUTPUT_DIR, slug)
     log(f"paths: intraday={intraday_path} history={history_path} slug={slug}")
 
-    intraday = read_any(intraday_path, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if intraday_path else pd.DataFrame()
-    history  = read_any(history_path , MP["RAW_TZ_HISTORY"] , MP["DISPLAY_TZ"]) if history_path  else pd.DataFrame()
-    daily_all = to_daily(history if not history.empty else intraday, MP["DISPLAY_TZ"])
+    intraday=read_any(intraday_path, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if intraday_path else pd.DataFrame()
+    history =read_any(history_path , MP["RAW_TZ_HISTORY"] , MP["DISPLAY_TZ"]) if history_path  else pd.DataFrame()
+    daily_all=to_daily(history if not history.empty else intraday, MP["DISPLAY_TZ"])
 
-    intraday = normalize_intraday_scale(intraday, daily_all, slug)
+    intraday=normalize_intraday_scale(intraday, daily_all, slug)
 
-    # --- 1d ---
-    df_1d=pd.DataFrame(); frame_1d=None; placeholder_frame=None
-    start_today, end_today = today_session_frame(MP["DISPLAY_TZ"], MP["SESSION_TZ"],
-                                                 MP["SESSION_START"], MP["SESSION_END"])
-    placeholder_frame=(start_today, end_today)
+    # ---- 1d（フォールバック付き）----
+    df_1d, frame_1d, placeholder = best_1d_window(intraday, MP)
+    plot_df(df_1d, slug, "1d", "1d", MP["DISPLAY_TZ"], frame=frame_1d, placeholder_frame=placeholder)
 
-    if not intraday.empty:
-        last_ts = intraday["time"].max()
-        start_disp, end_disp = session_frame_on_display(last_ts, MP["SESSION_TZ"], MP["DISPLAY_TZ"],
-                                                        MP["SESSION_START"], MP["SESSION_END"])
-        mask=(intraday["time"]>=start_disp) & (intraday["time"]<=end_disp)
-        df_1d = intraday.loc[mask].copy()
-        log(f"1d primary rows={len(df_1d)} [{start_disp} .. {end_disp}]")
-
-        if len(df_1d)<5:
-            day = last_ts.tz_convert(MP["DISPLAY_TZ"]).normalize()
-            day_end = day + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-            cands = intraday[(intraday["time"]>=day) & (intraday["time"]<=day_end)]
-            log(f"1d fallback day-range rows={len(cands)} [{day} .. {day_end}]")
-            if not cands.empty:
-                mask2=(cands["time"]>=start_disp) & (cands["time"]<=end_disp)
-                df_1d=cands.loc[mask2].copy()
-                log(f"1d fallback session rows={len(df_1d)} after clip")
-        frame_1d=(start_disp, end_disp)
-
-    plot_df(df_1d, slug, "1d", "1d", MP["DISPLAY_TZ"], frame=frame_1d, placeholder_frame=placeholder_frame)
-
-    # --- 7d / 1m / 1y ---
-    now = pd.Timestamp.now(tz=MP["DISPLAY_TZ"])
+    # ---- 7d / 1m / 1y ----
+    now=pd.Timestamp.now(tz=MP["DISPLAY_TZ"])
     for label, days in [("7d",7),("1m",31),("1y",365)]:
         sub=daily_all[daily_all["time"] >= (now - timedelta(days=days))]
         log(f"{label} rows={len(sub)} (since {now - timedelta(days=days)})")
