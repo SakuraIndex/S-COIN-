@@ -2,22 +2,25 @@
 # -*- coding: utf-8 -*-
 """
 Generate long-term charts (1d/7d/1m/1y) for Sakura Index series.
-- 1d の値が % っぽい場合は前日終値から絶対値に補正。
+
+改良点:
+- 1d 抽出が空/少数でも必ず PNG を保存（No data プレースホルダー）
+- セッション切り出しで行数が少ない場合にフォールバックして再抽出
+- ログを詳細化（原因追跡を容易に）
+- Python3.8 互換（Union[...] を使用）
 """
 
 import os
 import re
 from datetime import timedelta
-from typing import Optional, Tuple, Union
+from typing import Union
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-# ============================================================
-# 基本設定
-# ============================================================
+# ============ 基本設定 ============
 
 OUTPUT_DIR = "docs/outputs"
 
@@ -46,13 +49,12 @@ def norm_slug(s: str) -> str:
     s = s.replace("+", "_plus").replace("-", "_").replace(" ", "_")
     return s
 
-# ============================================================
-# 市場セッション定義
-# ============================================================
+# ============ 市場セッション定義 ============
 
 def market_profile(index_key: str) -> dict:
     k = (index_key or "").lower()
-    if k in ("ain10", "ain-10"):
+    # 米株 (表示はJST)
+    if k in ("ain10", "ain-10", "astra4"):
         return dict(
             RAW_TZ_INTRADAY="America/New_York",
             RAW_TZ_HISTORY="Asia/Tokyo",
@@ -61,15 +63,7 @@ def market_profile(index_key: str) -> dict:
             SESSION_START=(9, 30),
             SESSION_END=(16, 0),
         )
-    if k in ("astra4",):
-        return dict(
-            RAW_TZ_INTRADAY="America/New_York",
-            RAW_TZ_HISTORY="Asia/Tokyo",
-            DISPLAY_TZ="Asia/Tokyo",
-            SESSION_TZ="America/New_York",
-            SESSION_START=(9, 30),
-            SESSION_END=(16, 0),
-        )
+    # 日本株 (S-COIN+)
     if k in ("scoin+", "scoin_plus", "scoinplus", "s-coin+"):
         return dict(
             RAW_TZ_INTRADAY="Asia/Tokyo",
@@ -79,6 +73,7 @@ def market_profile(index_key: str) -> dict:
             SESSION_START=(9, 0),
             SESSION_END=(15, 30),
         )
+    # 日本株 (R-BANK9)
     if k in ("rbank9", "r-bank9", "r_bank9"):
         return dict(
             RAW_TZ_INTRADAY="Asia/Tokyo",
@@ -88,6 +83,7 @@ def market_profile(index_key: str) -> dict:
             SESSION_START=(9, 0),
             SESSION_END=(15, 0),
         )
+    # フォールバック（JST）
     return dict(
         RAW_TZ_INTRADAY="Asia/Tokyo",
         RAW_TZ_HISTORY="Asia/Tokyo",
@@ -97,9 +93,7 @@ def market_profile(index_key: str) -> dict:
         SESSION_END=(15, 0),
     )
 
-# ============================================================
-# ファイル読み込み
-# ============================================================
+# ============ 入出力ユーティリティ ============
 
 def _first(paths):
     for p in paths:
@@ -152,17 +146,21 @@ def read_any(path, raw_tz, display_tz):
             tcol = name
             break
     if not tcol:
-        fuzzy = [c for c in df.columns if "time" in c or "date" in c]
+        fuzzy = [c for c in df.columns if ("time" in c) or ("date" in c)]
         tcol = fuzzy[0] if fuzzy else None
     if not tcol:
-        raise KeyError("No time-like column found.")
+        raise KeyError(f"No time-like column found. columns={list(df.columns)}")
+
     vcol = pick_value_col(df)
     volcol = pick_volume_col(df)
+
     out = pd.DataFrame()
     out["time"] = df[tcol].apply(lambda x: parse_time_any(x, raw_tz, display_tz))
     out["value"] = pd.to_numeric(df[vcol], errors="coerce")
     out["volume"] = pd.to_numeric(df[volcol], errors="coerce") if volcol else 0
     out = out.dropna(subset=["time", "value"]).sort_values("time").reset_index(drop=True)
+
+    log(f"read_any: rows={len(out)} path={path}")
     return out
 
 def to_daily(df, display_tz):
@@ -174,9 +172,7 @@ def to_daily(df, display_tz):
     g["time"] = pd.to_datetime(g["date"]).dt.tz_localize(display_tz)
     return g[["time", "value", "volume"]]
 
-# ============================================================
-# スケール補正
-# ============================================================
+# ============ スケール補正（%→絶対値） ============
 
 def _try_load_last_close(slug, daily_all):
     v = os.environ.get("LAST_CLOSE", "").strip()
@@ -216,9 +212,10 @@ def normalize_intraday_scale(intraday, daily_all, slug):
     if s.isna().all():
         return intraday
     max_abs = float(s.abs().max())
-    is_decimal_pct = max_abs <= 0.2
-    is_pct = max_abs <= 5.0
+    is_decimal_pct = max_abs <= 0.2     # 0.05 (=+5%)
+    is_pct = max_abs <= 5.0             # 5   (=+5%)
     if not (is_decimal_pct or is_pct):
+        log("normalize: looks absolute already; skip")
         return intraday
     last_close = _try_load_last_close(slug, daily_all)
     if last_close is None:
@@ -232,9 +229,7 @@ def normalize_intraday_scale(intraday, daily_all, slug):
         f"({'decimal-pct' if is_decimal_pct else 'pct'})")
     return out
 
-# ============================================================
-# プロット
-# ============================================================
+# ============ 時間軸/プロット補助 ============
 
 def format_time_axis(ax, mode, tz):
     if mode == "1d":
@@ -261,10 +256,27 @@ def session_frame_on_display(base_ts, session_tz, display_tz, start_hm, end_hm):
     end = pd.Timestamp(d.year, d.month, d.day, end_hm[0], end_hm[1], tz=session_tz)
     return start.tz_convert(display_tz), end.tz_convert(display_tz)
 
+def ensure_saved(fig, outpath):
+    os.makedirs(os.path.dirname(outpath), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=180)
+    plt.close(fig)
+    log(f"saved: {outpath}")
+
 def plot_df(df, slug, label, mode, tz, frame=None):
+    outpath = f"{OUTPUT_DIR}/{slug}_{label}.png"
+
+    # 空ならプレースホルダーを保存して必ず出力
     if df.empty:
-        log(f"skip {slug}_{label} (empty)")
+        log(f"plot_df: empty => placeholder saved ({slug}_{label})")
+        fig, ax = plt.subplots(figsize=(9.5, 4.8))
+        ax.grid(True, alpha=0.3)
+        ax.set_title(f"{slug.upper()} ({label})", color="#ffb6c1")
+        ax.text(0.5, 0.5, "No data", color="#b8c2e0", ha="center", va="center", transform=ax.transAxes, fontsize=16)
+        ensure_saved(fig, outpath)
         return
+
+    # 線色（1dのみ方向で色分け）
     if mode == "1d":
         open_p = df["value"].iloc[0]
         close_p = df["value"].iloc[-1]
@@ -272,42 +284,54 @@ def plot_df(df, slug, label, mode, tz, frame=None):
         lw = 2.2
     else:
         color_line, lw = COLOR_PRICE_DEFAULT, 1.8
+
     fig, ax1 = plt.subplots(figsize=(9.5, 4.8))
     ax1.grid(True, alpha=0.3)
-    if "volume" in df and df["volume"].abs().sum() > 0:
+
+    # 出来高あれば重ね描き
+    if "volume" in df and pd.to_numeric(df["volume"], errors="coerce").abs().sum() > 0:
         ax2 = ax1.twinx()
-        ax2.bar(df["time"], df["volume"], width=0.9, color=COLOR_VOLUME, alpha=0.35)
-    ax1.plot(df["time"], df["value"], color=color_line, lw=lw)
+        ax2.bar(df["time"], df["volume"], width=0.9 if mode == "1d" else 0.8,
+                color=COLOR_VOLUME, alpha=0.35, zorder=1)
+
+    ax1.plot(df["time"], df["value"], color=color_line, lw=lw, solid_capstyle="round", zorder=3)
     ax1.set_title(f"{slug.upper()} ({label})", color="#ffb6c1")
     ax1.set_xlabel("Time" if mode == "1d" else "Date")
     ax1.set_ylabel("Index Value")
+
     format_time_axis(ax1, mode, tz)
     apply_y_padding(ax1, df["value"])
     if frame:
         ax1.set_xlim(frame)
-    outpath = f"{OUTPUT_DIR}/{slug}_{label}.png"
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=180)
-    plt.close()
-    log(f"saved: {outpath}")
 
-# ============================================================
-# メイン
-# ============================================================
+    ensure_saved(fig, outpath)
+
+# ============ メイン ============
 
 def main():
     index_key = os.environ.get("INDEX_KEY", "").strip()
     if not index_key:
         raise SystemExit("ERROR: INDEX_KEY not set")
+
     slug = norm_slug(index_key)
     MP = market_profile(index_key)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     intraday_path = find_intraday(OUTPUT_DIR, slug)
     history_path = find_history(OUTPUT_DIR, slug)
+    log(f"paths: intraday={intraday_path} history={history_path} slug={slug}")
+
     intraday = read_any(intraday_path, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if intraday_path else pd.DataFrame()
     history = read_any(history_path, MP["RAW_TZ_HISTORY"], MP["DISPLAY_TZ"]) if history_path else pd.DataFrame()
     daily_all = to_daily(history if not history.empty else intraday, MP["DISPLAY_TZ"])
+
+    # % → 絶対値補正（必要時）
     intraday = normalize_intraday_scale(intraday, daily_all, slug)
+
+    # ---- 1d 抽出（フォールバック付き）----
+    df_1d = pd.DataFrame()
+    frame_1d = None
+
     if not intraday.empty:
         last_ts = intraday["time"].max()
         start_disp, end_disp = session_frame_on_display(
@@ -315,15 +339,28 @@ def main():
         )
         mask = (intraday["time"] >= start_disp) & (intraday["time"] <= end_disp)
         df_1d = intraday.loc[mask].copy()
+        log(f"1d primary window rows={len(df_1d)} [{start_disp} .. {end_disp}]")
+
+        # 行数が少ない/0 の場合はフォールバック（その日の 0:00～23:59 で再抽出→セッションで再クリップ）
+        if len(df_1d) < 5:
+            day = last_ts.tz_convert(MP["DISPLAY_TZ"]).normalize()
+            day_end = day + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            cands = intraday[(intraday["time"] >= day) & (intraday["time"] <= day_end)]
+            log(f"1d fallback day-range rows={len(cands)} [{day} .. {day_end}]")
+            if not cands.empty:
+                mask2 = (cands["time"] >= start_disp) & (cands["time"] <= end_disp)
+                df_1d = cands.loc[mask2].copy()
+                log(f"1d fallback session rows={len(df_1d)} after clip")
         frame_1d = (start_disp, end_disp)
-    else:
-        df_1d, frame_1d = pd.DataFrame(), None
+
+    # ここで空でも必ず PNG を保存されるように
     plot_df(df_1d, slug, "1d", "1d", MP["DISPLAY_TZ"], frame=frame_1d)
+
+    # ---- 7d / 1m / 1y ----
     now = pd.Timestamp.now(tz=MP["DISPLAY_TZ"])
     for label, days in [("7d", 7), ("1m", 31), ("1y", 365)]:
         sub = daily_all[daily_all["time"] >= (now - timedelta(days=days))]
-        if sub.empty:
-            continue
+        log(f"{label} window rows={len(sub)} (since {now - timedelta(days=days)})")
         plot_df(sub, slug, label, "long", MP["DISPLAY_TZ"])
 
 if __name__ == "__main__":
