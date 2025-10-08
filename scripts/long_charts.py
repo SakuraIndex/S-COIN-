@@ -5,6 +5,7 @@ Generate long-term charts (1d/7d/1m/1y) for Sakura Index series.
 - セッション/タイムゾーンは INDEX_KEY に応じて自動切り替え
 - 1d は 始値<終値: 青緑 / 始値>終値: 赤 / 同値: グレー
 - 出来高があれば薄い棒で重ね描き
+- データ不足の期間は自動スキップ（ガード）
 出力先: docs/outputs/<index_key>_{1d|7d|1m|1y}.png
 """
 
@@ -236,6 +237,15 @@ def et_session_to_jst_frame(base_ts_jst, session_tz, display_tz, start_hm, end_h
                           end_hm[0], end_hm[1], tz=session_tz)
     return start_et.tz_convert(display_tz), end_et.tz_convert(display_tz)
 
+# ===== 追加：ガード共通関数 ==================================
+
+def enough_rows(df: pd.DataFrame, need: int) -> bool:
+    """有効値の点数チェック"""
+    if df is None or df.empty:
+        return False
+    n = len(df.dropna(subset=["time", "value"]))
+    return n >= need
+
 # ============================================================
 #  描画本体
 # ============================================================
@@ -264,7 +274,7 @@ def plot_df(df, index_key, label, mode, tz, frame=None):
     ax1.grid(True, alpha=0.3)
 
     # 出来高（あれば）
-    if df["volume"].abs().sum() > 0:
+    if "volume" in df.columns and df["volume"].abs().sum() > 0:
         ax2 = ax1.twinx()
         ax2.bar(df["time"], df["volume"],
                 width=0.9 if mode == "1d" else 0.8,
@@ -278,8 +288,12 @@ def plot_df(df, index_key, label, mode, tz, frame=None):
 
     format_time_axis(ax1, mode, tz)
     apply_y_padding(ax1, df["value"])
+
     if frame is not None:
-        ax1.set_xlim(frame)
+        # フレームの健全性チェック（NaT/逆転を避ける）
+        left, right = frame
+        if pd.notna(left) and pd.notna(right) and left < right:
+            ax1.set_xlim(frame)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     outpath = f"{OUTPUT_DIR}/{index_key}_{label}.png"
@@ -303,11 +317,13 @@ def main():
     intraday_path = find_intraday(OUTPUT_DIR, index_key)
     history_path = find_history(OUTPUT_DIR, index_key)
 
-    intraday = read_any(intraday_path, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if intraday_path else pd.DataFrame()
-    history = read_any(history_path, MP["RAW_TZ_HISTORY"], MP["DISPLAY_TZ"]) if history_path else pd.DataFrame()
+    intraday = read_any(intraday_path, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if intraday_path else pd.DataFrame(columns=["time","value","volume"])
+    history  = read_any(history_path,  MP["RAW_TZ_HISTORY"],  MP["DISPLAY_TZ"]) if history_path  else pd.DataFrame(columns=["time","value","volume"])
     daily_all = to_daily(history if not history.empty else intraday, MP["DISPLAY_TZ"])
 
     # ---- 1d（セッションで切り出し）----
+    df_1d = pd.DataFrame(columns=["time","value","volume"])
+    frame_1d = None
     if not intraday.empty:
         last_ts = intraday["time"].max()
         start_jst, end_jst = et_session_to_jst_frame(
@@ -317,18 +333,28 @@ def main():
         mask = (intraday["time"] >= start_jst) & (intraday["time"] <= end_jst)
         df_1d = intraday.loc[mask].copy()
         frame_1d = (start_jst, end_jst)
-    else:
-        df_1d = pd.DataFrame()
-        frame_1d = None
 
-    plot_df(df_1d, index_key, "1d", "1d", MP["DISPLAY_TZ"], frame=frame_1d)
+    # ---- ガード（十分な点数がなければ描かない）----
+    # 1d は最低 5点（約5本）あれば描画
+    if enough_rows(df_1d, 5):
+        plot_df(df_1d, index_key, "1d", "1d", MP["DISPLAY_TZ"], frame=frame_1d)
+    else:
+        log("skip 1d: not enough intraday rows")
 
     # ---- 7d / 1m / 1y（終値ベースの長期）----
     now = pd.Timestamp.now(tz=MP["DISPLAY_TZ"])
+
+    # 期間ごとの最低点数（必要に応じて調整）
+    MIN_ROWS = {
+        "7d": 4,   # おおむね4営業日
+        "1m": 10,  # 10日以上
+        "1y": 50,  # 50日以上
+    }
+
     for label, days in [("7d", 7), ("1m", 31), ("1y", 365)]:
-        sub = daily_all[daily_all["time"] >= (now - timedelta(days=days))]
-        if sub.empty:
-            log(f"skip plot {index_key}_{label} (no data window)")
+        sub = daily_all[daily_all["time"] >= (now - timedelta(days=days))].copy()
+        if not enough_rows(sub, MIN_ROWS[label]):
+            log(f"skip {label}: not enough daily rows (have={len(sub)})")
             continue
         plot_df(sub, index_key, label, "long", MP["DISPLAY_TZ"])
 
