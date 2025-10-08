@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Generate long-term charts (1d/7d/1m/1y) for Sakura Index series.
+Long-term charts (1d/7d/1m/1y) generator with robust session/tz handling
+and auto scale normalization for intraday (% -> absolute).
 
-- 出力ファイル名は key_slug(index_key) で正規化（AIN-10→ain10, S-COIN+→scoin_plus 等）
-- 1d はセッション（INDEX_KEYごとに）JST 表示で切り出し
-  → 空になった場合は直近6時間のフォールバックで必ず PNG を出力
-- 長期（7d/1m/1y）は日足（終値）で生成
-- 1d の色分け：上昇=青緑 (#00C2A0) / 下降=赤 (#FF4C4C) / 同値=灰
-
-出力: docs/outputs/<slug>_{1d|7d|1m|1y}.png
+- 出力ファイル名は key_slug(index_key) で正規化（AIN-10→ain10, S-COIN+→scoin_plus …）
+- 1d はセッション枠（INDEX_KEY ごと）で JST 表示
+  * セッションに合っていなければ ALT_RAW_TZ（例: UTC）で再解釈して補正
+  * 値が％らしければ最新終値を基準に“絶対値”へ復元
+  * それでも空なら直近6時間フォールバック（軸はセッション枠を維持）
+- 7d/1m/1y は日足（終値）で描画
+- 1d 色分け：上昇=青緑 / 下降=赤 / 同値=灰
 """
 
 import os
@@ -43,14 +44,11 @@ plt.rcParams.update({
 def log(msg: str):
     print(f"[long_charts] {msg}")
 
-# ---- key slug ---------------------------------------------------------------
-
+# -----------------------------------------------------------------------------
+# Slug (ファイル名の統一)
+# -----------------------------------------------------------------------------
 def key_slug(index_key: str) -> str:
-    """
-    出力ファイル名用のスラッグを作成。
-    """
     k = (index_key or "").lower().strip()
-    # よくある別名を正規化
     mapping = {
         "ain-10": "ain10", "ain_10": "ain10",
         "s-coin+": "scoin_plus", "scoin+": "scoin_plus", "scoinplus": "scoin_plus",
@@ -58,17 +56,15 @@ def key_slug(index_key: str) -> str:
     }
     if k in mapping:
         return mapping[k]
-    # それ以外は英数字以外を '_' に
-    slug = re.sub(r"[^a-z0-9]+", "_", k).strip("_")
-    return slug or "index"
+    return re.sub(r"[^a-z0-9]+", "_", k).strip("_") or "index"
 
-# ---- market profile ---------------------------------------------------------
-
+# -----------------------------------------------------------------------------
+# 市場プロファイル
+# -----------------------------------------------------------------------------
 def market_profile(index_key: str):
-    k = key_slug(index_key)
+    slug = key_slug(index_key)
 
-    # AIN-10：米国株（表示は JST、セッションは NY）
-    if k == "ain10":
+    if slug == "ain10":
         return dict(
             RAW_TZ_INTRADAY="America/New_York",
             RAW_TZ_HISTORY="Asia/Tokyo",
@@ -76,10 +72,10 @@ def market_profile(index_key: str):
             SESSION_TZ="America/New_York",
             SESSION_START=(9, 30),
             SESSION_END=(16, 0),
+            ALT_RAW_TZ="UTC",
         )
 
-    # Astra4：米国株中心
-    if k == "astra4":
+    if slug == "astra4":
         return dict(
             RAW_TZ_INTRADAY="America/New_York",
             RAW_TZ_HISTORY="Asia/Tokyo",
@@ -87,10 +83,11 @@ def market_profile(index_key: str):
             SESSION_TZ="America/New_York",
             SESSION_START=(9, 30),
             SESSION_END=(16, 0),
+            ALT_RAW_TZ="UTC",
         )
 
-    # S-COIN+：日本株 9:00-15:30 JST
-    if k == "scoin_plus":
+    if slug == "scoin_plus":
+        # 日本株 9:00–15:30（JST）
         return dict(
             RAW_TZ_INTRADAY="Asia/Tokyo",
             RAW_TZ_HISTORY="Asia/Tokyo",
@@ -98,10 +95,11 @@ def market_profile(index_key: str):
             SESSION_TZ="Asia/Tokyo",
             SESSION_START=(9, 0),
             SESSION_END=(15, 30),
+            ALT_RAW_TZ="UTC",
         )
 
-    # R-BANK9：日本株 9:00-15:00 JST
-    if k == "rbank9":
+    if slug == "rbank9":
+        # 日本株 9:00–15:00（JST）
         return dict(
             RAW_TZ_INTRADAY="Asia/Tokyo",
             RAW_TZ_HISTORY="Asia/Tokyo",
@@ -109,6 +107,7 @@ def market_profile(index_key: str):
             SESSION_TZ="Asia/Tokyo",
             SESSION_START=(9, 0),
             SESSION_END=(15, 0),
+            ALT_RAW_TZ="UTC",
         )
 
     # fallback：JST
@@ -119,10 +118,12 @@ def market_profile(index_key: str):
         SESSION_TZ="Asia/Tokyo",
         SESSION_START=(9, 0),
         SESSION_END=(15, 0),
+        ALT_RAW_TZ="UTC",
     )
 
-# ---- IO helpers -------------------------------------------------------------
-
+# -----------------------------------------------------------------------------
+# IO
+# -----------------------------------------------------------------------------
 def _first(paths):
     for p in paths:
         if os.path.exists(p):
@@ -139,10 +140,8 @@ def parse_time_any(x, raw_tz, display_tz):
     if pd.isna(x):
         return pd.NaT
     s = str(x).strip()
-    # epoch 秒
     if re.fullmatch(r"\d{10}", s):
         return pd.Timestamp(int(s), unit="s", tz="UTC").tz_convert(display_tz)
-    # 汎用
     t = pd.to_datetime(s, errors="coerce")
     if pd.isna(t):
         return pd.NaT
@@ -165,7 +164,7 @@ def pick_volume_col(df):
             return df.columns[cols.index(k)]
     return None
 
-def read_any(path, raw_tz, display_tz):
+def read_csv_as_timeseries(path, raw_tz, display_tz):
     if not path:
         return pd.DataFrame(columns=["time", "value", "volume"])
     df = pd.read_csv(path)
@@ -201,8 +200,78 @@ def to_daily(df, display_tz):
     g["time"] = pd.to_datetime(g["date"]).dt.tz_localize(display_tz)
     return g[["time", "value", "volume"]]
 
-# ---- plot helpers -----------------------------------------------------------
+# -----------------------------------------------------------------------------
+# セッション関連
+# -----------------------------------------------------------------------------
+def session_frame(base_ts_display, session_tz, display_tz, start_hm, end_hm):
+    et = base_ts_display.tz_convert(session_tz)
+    d = et.date()
+    start = pd.Timestamp(d.year, d.month, d.day, start_hm[0], start_hm[1], tz=session_tz)
+    end = pd.Timestamp(d.year, d.month, d.day, end_hm[0], end_hm[1], tz=session_tz)
+    return start.tz_convert(display_tz), end.tz_convert(display_tz)
 
+def fraction_in_session(df, display_tz, session_tz, start_hm, end_hm):
+    if df.empty: return 0.0
+    last_ts = df["time"].max()
+    start, end = session_frame(last_ts, session_tz, display_tz, start_hm, end_hm)
+    mask = (df["time"] >= start) & (df["time"] <= end)
+    return float(mask.sum()) / float(len(df))
+
+def ensure_session_aligned(path_intraday, MP):
+    intraday = read_csv_as_timeseries(path_intraday, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) \
+               if path_intraday else pd.DataFrame()
+    ratio = fraction_in_session(intraday, MP["DISPLAY_TZ"], MP["SESSION_TZ"],
+                                MP["SESSION_START"], MP["SESSION_END"])
+    log(f"session coverage with RAW_TZ={MP['RAW_TZ_INTRADAY']}: {ratio:.2f}")
+
+    if ratio < 0.25 and path_intraday and MP.get("ALT_RAW_TZ"):
+        intraday_alt = read_csv_as_timeseries(path_intraday, MP["ALT_RAW_TZ"], MP["DISPLAY_TZ"])
+        ratio_alt = fraction_in_session(intraday_alt, MP["DISPLAY_TZ"], MP["SESSION_TZ"],
+                                        MP["SESSION_START"], MP["SESSION_END"])
+        log(f"session coverage with ALT_RAW_TZ={MP['ALT_RAW_TZ']}: {ratio_alt:.2f}")
+        if ratio_alt > ratio:
+            log("use ALT_RAW_TZ result (better alignment)")
+            return intraday_alt
+    return intraday
+
+# -----------------------------------------------------------------------------
+# 値スケール補正（％→絶対値）
+# -----------------------------------------------------------------------------
+def normalize_intraday_scale(intraday: pd.DataFrame, daily_all: pd.DataFrame) -> pd.DataFrame:
+    """
+    intraday['value'] が％っぽい場合に最新終値を基準として絶対値へ変換する。
+    例）max(|v|) <= 0.2 → 小数％とみなして v*=100、max(|v|) <= 5 → ％とみなす。
+    いずれも last_close * (1 + v/100) へ。
+    """
+    if intraday.empty or daily_all.empty:
+        return intraday
+
+    s = pd.to_numeric(intraday["value"], errors="coerce")
+    if s.isna().all():
+        return intraday
+
+    max_abs = float(s.abs().max())
+    last_close = float(pd.to_numeric(daily_all["value"], errors="coerce").dropna().iloc[-1])
+
+    # 日足の終値が十分なスケール（例: > 50）で、intraday が小幅なら％と判定
+    is_decimal_pct = max_abs <= 0.2
+    is_pct = (max_abs <= 5.0)  # 5% 以内の振れなら％と仮定
+
+    if last_close > 50 and (is_decimal_pct or is_pct):
+        pct = s * (100.0 if is_decimal_pct else 1.0)
+        abs_val = last_close * (1.0 + (pct / 100.0))
+        out = intraday.copy()
+        out["value"] = abs_val
+        log(f"normalized intraday scale using last_close={last_close:.4f} "
+            f"(detected {'decimal-pct' if is_decimal_pct else 'pct'})")
+        return out
+
+    # すでに絶対値と判断
+    return intraday
+
+# -----------------------------------------------------------------------------
+# Plot helpers
+# -----------------------------------------------------------------------------
 def format_time_axis(ax, mode, tz):
     if mode == "1d":
         ax.xaxis.set_major_locator(mdates.HourLocator(interval=1, tz=tz))
@@ -220,26 +289,10 @@ def apply_y_padding(ax, series):
     pad = (hi - lo) * 0.08 if hi != lo else max(abs(lo) * 0.02, 0.5)
     ax.set_ylim(lo - pad, hi + pad)
 
-def session_frame(base_ts_display, session_tz, display_tz, start_hm, end_hm):
-    """
-    表示TZの基準時刻から、セッションTZの本日枠を表示TZに戻して返す。
-    """
-    stz = session_tz
-    et = base_ts_display.tz_convert(stz)
-    d = et.date()
-    start = pd.Timestamp(d.year, d.month, d.day, start_hm[0], start_hm[1], tz=stz)
-    end = pd.Timestamp(d.year, d.month, d.day, end_hm[0], end_hm[1], tz=stz)
-    return start.tz_convert(display_tz), end.tz_convert(display_tz)
-
-# ---- plotting ---------------------------------------------------------------
-
 def plot_df(df, title_key, label, mode, tz, outpath, frame=None):
-    # カラー決定
     if mode == "1d" and not df.empty:
         open_p = df["value"].iloc[0]; close_p = df["value"].iloc[-1]
-        if close_p > open_p: color_line = COLOR_UP
-        elif close_p < open_p: color_line = COLOR_DOWN
-        else: color_line = COLOR_EQUAL
+        color_line = COLOR_UP if close_p > open_p else (COLOR_DOWN if close_p < open_p else COLOR_EQUAL)
         lw = 2.2
     else:
         color_line = COLOR_PRICE_DEFAULT; lw = 1.8
@@ -247,14 +300,12 @@ def plot_df(df, title_key, label, mode, tz, outpath, frame=None):
     fig, ax1 = plt.subplots(figsize=(9.5, 4.8))
     ax1.grid(True, alpha=0.3)
 
-    # volume（あれば）
     if not df.empty and df["volume"].abs().sum() > 0:
         ax2 = ax1.twinx()
         ax2.bar(df["time"], df["volume"],
                 width=0.9 if mode == "1d" else 0.8,
                 color=COLOR_VOLUME, alpha=0.35, zorder=1, label="Volume")
 
-    # 値線（空でも軸・タイトルは描く）
     if not df.empty:
         ax1.plot(df["time"], df["value"], color=color_line, lw=lw,
                  solid_capstyle="round", label="Index", zorder=3)
@@ -272,10 +323,11 @@ def plot_df(df, title_key, label, mode, tz, outpath, frame=None):
     plt.tight_layout()
     plt.savefig(outpath, dpi=180)
     plt.close()
-    log(f"saved: {outpath}  size={len(df)}")
+    log(f"saved: {outpath} size={len(df)}")
 
-# ---- main -------------------------------------------------------------------
-
+# -----------------------------------------------------------------------------
+# main
+# -----------------------------------------------------------------------------
 def main():
     index_key = os.environ.get("INDEX_KEY", "")
     if not index_key:
@@ -284,46 +336,46 @@ def main():
     MP = market_profile(index_key)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 入力
     p_i = find_intraday(OUTPUT_DIR, slug)
     p_h = find_history(OUTPUT_DIR, slug)
-    log(f"read intraday: {p_i}")
-    log(f"read history : {p_h}")
+    log(f"intraday: {p_i}")
+    log(f"history : {p_h}")
 
-    intraday = read_any(p_i, MP["RAW_TZ_INTRADAY"], MP["DISPLAY_TZ"]) if p_i else pd.DataFrame()
-    history  = read_any(p_h, MP["RAW_TZ_HISTORY"],  MP["DISPLAY_TZ"]) if p_h else pd.DataFrame()
+    # intraday（自動セッション整合）
+    intraday = ensure_session_aligned(p_i, MP)
+
+    # history -> daily
+    history = read_csv_as_timeseries(p_h, MP["RAW_TZ_HISTORY"], MP["DISPLAY_TZ"]) if p_h else pd.DataFrame()
     daily_all = to_daily(history if not history.empty else intraday, MP["DISPLAY_TZ"])
 
-    # --- 1d ---
+    # まず％→絶対値の自動補正を試みる（1d の値スケールの整合）
+    intraday = normalize_intraday_scale(intraday, daily_all)
+
+    # ---- 1d (セッション枠) ----
     df_1d = pd.DataFrame(); frame_1d = None
     if not intraday.empty:
         last_ts = intraday["time"].max()
-        start_jst, end_jst = session_frame(
-            last_ts, MP["SESSION_TZ"], MP["DISPLAY_TZ"],
-            MP["SESSION_START"], MP["SESSION_END"]
-        )
+        start_jst, end_jst = session_frame(last_ts, MP["SESSION_TZ"], MP["DISPLAY_TZ"],
+                                           MP["SESSION_START"], MP["SESSION_END"])
         mask = (intraday["time"] >= start_jst) & (intraday["time"] <= end_jst)
         df_1d = intraday.loc[mask].copy()
         frame_1d = (start_jst, end_jst)
 
-        # フォールバック（窓が空なら直近 6h）
         if df_1d.empty:
             cutoff = last_ts - pd.Timedelta(hours=6)
             df_1d = intraday[intraday["time"] >= cutoff].copy()
-            frame_1d = (cutoff, last_ts)
-            log("1d window empty -> fallback to last 6h")
+            log("1d window empty -> fallback to last 6h (axis kept to session)")
     else:
-        log("intraday not found -> 1d will be empty but still saved")
+        log("intraday not found -> 1d empty (will still save canvas)")
 
     plot_df(df_1d, slug, "1d", "1d", MP["DISPLAY_TZ"], f"{OUTPUT_DIR}/{slug}_1d.png", frame=frame_1d)
 
-    # --- long windows ---
+    # ---- 7d / 1m / 1y ----
     now = pd.Timestamp.now(tz=MP["DISPLAY_TZ"])
     for label, days in [("7d", 7), ("1m", 31), ("1y", 365)]:
         sub = daily_all[daily_all["time"] >= (now - timedelta(days=days))].copy()
         if sub.empty:
-            log(f"skip {label}: no data window");  # それでも古い画像を残したいなら保存しない方が安全
-            continue
+            log(f"skip {label}: no data window"); continue
         plot_df(sub, slug, label, "long", MP["DISPLAY_TZ"], f"{OUTPUT_DIR}/{slug}_{label}.png")
 
 if __name__ == "__main__":
