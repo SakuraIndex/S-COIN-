@@ -3,73 +3,61 @@ name: Generate long-term charts (S-COIN+)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "35 6 * * *"   # 任意。毎日JST 15:35 頃などに合わせる場合は調整
+    - cron: "15 6 * * *"   # 毎日 JST 15:15 実行（任意で変更）
 
 permissions:
-  contents: write   # ← これが無いとコミットできません
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     env:
-      # ---- 必須 ----
-      INDEX_KEY: scoin_plus              # 出力ファイル名の接頭辞（scoin_plus_*.png）
-      PROFILE: jst_stock                 # 日本株時間 09:00-15:30 JST
-      DISPLAY_TZ: Asia/Tokyo             # 軸ラベル表示
-      RAW_TZ_INTRADAY: Asia/Tokyo        # intraday.csv のタイムゾーン
-      RAW_TZ_HISTORY: Asia/Tokyo         # history.csv のタイムゾーン（あれば）
-      # ---- 任意（無くてもOK）----
-      OUT_DIR: docs/outputs              # 出力先
+      # ← long_charts.py が読むキー。ファイル名と対応（scoin_plus_*.csv）
+      INDEX_KEY: scoin_plus
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 事前に CSV があるかを確認（名前が違うと生成されません）
+      - name: List BEFORE
+        run: |
+          ls -lah
+          echo "---- docs/outputs ----"
+          ls -lah docs/outputs || true
+
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
       - name: Install deps
         run: |
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas matplotlib pytz python-dateutil
-          fi
+          pip install -r requirements.txt || true
+          # 万一 requirements に含め忘れがあっても最低限動かす
+          pip install pandas matplotlib pytz python-dateutil
 
-      - name: Generate long-term charts (1d/7d/1m/1y)
+      - name: Generate long-term charts
         run: |
           set -e
-          echo "::group::Run long_charts.py"
           python scripts/long_charts.py
-          echo "::endgroup::"
 
-      - name: List outputs (before commit)
+      - name: List AFTER
         run: |
-          echo "== ls -al docs/outputs =="
-          ls -al docs/outputs || true
+          echo "---- docs/outputs (after) ----"
+          ls -lah docs/outputs || true
 
-      - name: Upload artifacts (PNG/CSV)
-        uses: actions/upload-artifact@v4
-        with:
-          name: scoin-plus-charts
-          path: |
-            docs/outputs/scoin_plus_*.png
-            docs/outputs/*history*.csv
-            docs/outputs/*intraday*.csv
-          if-no-files-found: warn
-
+      # 変更がある場合のみ自動コミット
       - name: Commit charts if changed
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/*.png || true
-          if git diff --cached --quiet; then
-            echo "No PNG changes to commit."
-          else
-            git commit -m "chore(charts): update S-COIN+ long-term charts (1d/7d/1m/1y)"
-            git push
-          fi
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(charts): update S-COIN+ long-term charts"
+          file_pattern: |
+            docs/outputs/scoin_plus_*.png
+            docs/outputs/scoin_plus_*.csv
+          push_options: --force-with-lease
