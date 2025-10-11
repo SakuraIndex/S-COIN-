@@ -4,20 +4,14 @@
 Generate long-term charts (1d / 7d / 1m / 1y) for INDEX_KEY.
 
 Inputs
-- docs/outputs/<index>_intraday.csv  (columns: time,value[,volume] or wide-plate by tickers)
-- docs/outputs/<index>_history.csv   (columns: date,value)
+- docs/outputs/<index>_intraday.csv  (time,value[,volume] 形式 もしくは 複数列の銘柄ワイド形式)
+- docs/outputs/<index>_history.csv   (date,value)
 
 Outputs
 - docs/outputs/<index>_1d.png
 - docs/outputs/<index>_7d.png
 - docs/outputs/<index>_1m.png
 - docs/outputs/<index>_1y.png
-
-ENV (optional)
-- INDEX_KEY:       e.g. "astra4" / "scoin_plus" / "rbank9" / "ain10"
-- DISPLAY_TZ:      target timezone (default: "Asia/Tokyo")
-- SESSION_START:   intraday clamp start local time (default: "09:00")
-- SESSION_END:     intraday clamp end   local time (default: "15:30")
 """
 
 from __future__ import annotations
@@ -29,16 +23,18 @@ import pytz
 import matplotlib
 import matplotlib.pyplot as plt
 
-# --------------- Theme ---------------
-BG     = "#0E1117"
-FG     = "#E6E6E6"
-TITLE  = "#f2b6c6"
-ACCENT = "#3bd6c6"  # long horizon line
-GRID_A = 0.25
+# ====== Theme / Const ======
+JP_TZ = pytz.timezone("Asia/Tokyo")
+SESSION_START = "09:00"
+SESSION_END   = "15:30"
 
-UP_COLOR   = "#e74c3c"  # 🔺 up   = red
-DOWN_COLOR = "#2ecc71"  # 🔻 down = green
-FLAT_COLOR = "#9aa0a6"  # neutral/insufficient data
+BG = "#0E1117"
+FG = "#E6E6E6"
+ACCENT = "#3bd6c6"
+TITLE  = "#f2b6c6"
+GRID_A = 0.25
+UP_COLOR = "#22c55e"   # 上昇（緑）
+DN_COLOR = "#ef4444"   # 下落（赤）
 
 matplotlib.rcParams.update({
     "figure.facecolor": BG,
@@ -52,32 +48,169 @@ matplotlib.rcParams.update({
     "savefig.facecolor": BG,
 })
 
-# --------------- Defaults & Paths ---------------
-OUTPUTS_DIR   = os.path.join("docs", "outputs")
-INDEX_KEY     = os.environ.get("INDEX_KEY", "index").strip().lower()
-INDEX_NAME    = INDEX_KEY.upper().replace("_", "")
-DISPLAY_TZSTR = os.environ.get("DISPLAY_TZ", "Asia/Tokyo")
-DISPLAY_TZ    = pytz.timezone(DISPLAY_TZSTR)
+OUTPUTS_DIR = os.path.join("docs", "outputs")
 
-SESSION_START = os.environ.get("SESSION_START", "09:00")
-SESSION_END   = os.environ.get("SESSION_END",   "15:30")
-
-# --------------- Helpers ---------------
+# ====== Utilities ======
 def _lower(df: pd.DataFrame) -> pd.DataFrame:
-    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
+    # 小文字比較しつつ列名は元のまま残したい場面があるので、返すのはそのまま。
     return df
 
 def _pick_time_col(cols: List[str]) -> Optional[str]:
-    for k in ("time", "timestamp", "date", "datetime"):
-        if k in cols:
-            return k
+    """候補の time 列名を柔軟に検出（英/日 / 大文字小文字混在を許容）"""
+    lowers = {c.lower(): c for c in cols}
+    for key in ("time", "timestamp", "datetime", "date", "日時"):
+        if key in lowers:
+            return lowers[key]
+    # unnamed系（Excel出力など）
     for c in cols:
-        if c.startswith("unnamed") and ": 0" in c:
-            return c
-    for c in cols:
-        if ("time" in c) or ("date" in c):
+        lc = c.lower()
+        if lc.startswith("unnamed") or "time" in lc or "date" in lc:
             return c
     return None
+
+def _first_numeric_col_except(df: pd.DataFrame, except_col: str) -> Optional[str]:
+    for c in df.columns:
+        if c == except_col:
+            continue
+        try:
+            series = pd.to_numeric(df[c], errors="coerce")
+            if series.notna().sum() > 0:
+                return c
+        except Exception:
+            continue
+    return None
+
+def _to_jst_series(s: pd.Series) -> pd.Series:
+    """文字列/naive/UTC いずれでも JST tz-aware へ統一"""
+    t = pd.to_datetime(s, errors="coerce", utc=True)
+    # utc=True で tz 付きにならなかった場合（全て naive の可能性）
+    if getattr(t.dt, "tz", None) is None:
+        # naive を JST とみなしてローカライズ
+        t = pd.to_datetime(s, errors="coerce").dt.tz_localize(JP_TZ).dt.tz_convert("UTC")
+    return t.dt.tz_convert(JP_TZ)
+
+def read_any_intraday(path: str) -> pd.DataFrame:
+    """
+    Return columns: time(JST tz-aware), value(float), volume(float; なければ 0)
+    - long 形式: [time,value(,volume?)] あるいは [time,<index_name>]
+    - wide 形式: [time,ticker1,ticker2,...] → 等加重平均
+    """
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["time", "value", "volume"])
+
+    raw = pd.read_csv(path, dtype=str)
+    if raw.empty:
+        return pd.DataFrame(columns=["time", "value", "volume"])
+
+    df = _lower(raw.copy())
+    # #コメント列の除去
+    drop_cols = [c for c in df.columns if str(c).strip().startswith("#")]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
+    tcol = _pick_time_col(df.columns.tolist())
+    if tcol is None:
+        # time列が無い→描けない
+        return pd.DataFrame(columns=["time", "value", "volume"])
+
+    # 値列の推定
+    vcol = None
+    volcol = None
+    for c in df.columns:
+        lc = c.lower()
+        if c == tcol:
+            continue
+        if lc in ("value", "index", "score") or ("value" in lc):
+            vcol = c
+        if lc == "volume" or ("volume" in lc):
+            volcol = c
+
+    # time → JST tz-aware
+    t = _to_jst_series(df[tcol])
+
+    out = pd.DataFrame({"time": t})
+
+    if vcol is None:
+        # 候補の最初の数値列を値とみなす（S-COIN+ など [Datetime, S-COIN+]）
+        vcol = _first_numeric_col_except(df, tcol)
+
+    if vcol is not None:
+        out["value"] = pd.to_numeric(df[vcol], errors="coerce")
+        if volcol and volcol in df.columns:
+            out["volume"] = pd.to_numeric(df[volcol], errors="coerce")
+        else:
+            out["volume"] = 0.0
+    else:
+        # wide → 等加重平均
+        num_cols = []
+        for c in df.columns:
+            if c == tcol:
+                continue
+            s = pd.to_numeric(df[c], errors="coerce")
+            if s.notna().sum() > 0:
+                num_cols.append(c)
+        if not num_cols:
+            return pd.DataFrame(columns=["time", "value", "volume"])
+        vals = df[num_cols].apply(lambda s: pd.to_numeric(s, errors="coerce"))
+        out["value"] = vals.mean(axis=1)
+        out["volume"] = 0.0
+
+    out = out.dropna(subset=["time", "value"]).sort_values("time").reset_index(drop=True)
+    return out
+
+def clamp_session_on_last_day(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    直近日のタイムスタンプ日付を基準に、取引セッション(09:00-15:30 JST)で切り出す。
+    それでも 0 件なら、その日の全データ（時間帯不問）をフォールバック表示。
+    """
+    if df.empty or "time" not in df.columns:
+        return df
+
+    t_all = pd.to_datetime(df["time"])
+    # tz-aware 確保
+    if t_all.dt.tz is None:
+        t_all = t_all.dt.tz_localize(JP_TZ)
+
+    last_ts = t_all.max().astimezone(JP_TZ)
+    last_day = last_ts.normalize()
+
+    start = pd.Timestamp(f"{last_day.date()} {SESSION_START}", tz=JP_TZ)
+    end   = pd.Timestamp(f"{last_day.date()} {SESSION_END}",   tz=JP_TZ)
+    m = (t_all >= start) & (t_all <= end)
+    cut = df.loc[m].reset_index(drop=True)
+    if len(cut) > 0:
+        return cut
+
+    # セッション時間に合致しない場合 → 同一カレンダーデイだけ採用（フォールバック）
+    m2 = (t_all.dt.date == last_day.date())
+    cut2 = df.loc[m2].reset_index(drop=True)
+    return cut2 if len(cut2) > 0 else df.tail(480).reset_index(drop=True)  # 最後の数時間を保険で
+
+def resample_minutes(df: pd.DataFrame, rule: str = "1min") -> pd.DataFrame:
+    if df.empty:
+        return df
+    tmp = df.set_index("time").sort_index()
+    out = tmp[["value"]].resample(rule).mean()
+    out["value"] = out["value"].interpolate(limit_direction="both")
+    out["volume"] = 0.0
+    return out.reset_index()
+
+def read_history(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["date", "value"])
+    df = pd.read_csv(path)
+    if df.empty:
+        return pd.DataFrame(columns=["date", "value"])
+    # 列名ゆるく
+    cols = {c.lower(): c for c in df.columns}
+    dcol = cols.get("date") or cols.get("日時") or list(df.columns)[0]
+    vcol = cols.get("value") or _first_numeric_col_except(df, dcol) or list(df.columns)[-1]
+    out = pd.DataFrame({
+        "date": pd.to_datetime(df[dcol], errors="coerce"),
+        "value": pd.to_numeric(df[vcol], errors="coerce")
+    })
+    return out.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
 
 def _decorate(ax, title: str, xl: str, yl: str):
     ax.set_title(title, color=TITLE, fontsize=20, pad=12)
@@ -91,164 +224,63 @@ def _save(fig, path: str):
     fig.savefig(path, facecolor=BG, bbox_inches="tight")
     plt.close(fig)
 
-# --------------- IO ---------------
-def read_any_intraday(path: str) -> pd.DataFrame:
-    """
-    Return columns: time(tz-aware in DISPLAY_TZ), value, volume
-    Accepts either long ("time,value[,volume]") or wide (tickers) formats.
-    Robust to UTC/naive/tz-aware time stamps by normalizing to DISPLAY_TZ.
-    """
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["time", "value", "volume"])
-
-    raw = pd.read_csv(path, dtype=str)
-    if raw.empty:
-        return pd.DataFrame(columns=["time", "value", "volume"])
-
-    df = _lower(raw.copy())
-
-    # drop comment columns like '# memo'
-    drop = [c for c in df.columns if str(c).strip().startswith("#")]
-    if drop:
-        df = df.drop(columns=drop)
-
-    tcol = _pick_time_col(df.columns.tolist())
-    if tcol is None:
-        raise KeyError(f"No time-like column in {path}")
-
-    # detect value/volume for long format
-    vcol, volcol = None, None
-    for c in df.columns:
-        lc = c
-        if lc in ("value", "index", "score") or ("value" in lc):
-            vcol = c
-        if lc == "volume" or ("volume" in lc):
-            volcol = c
-
-    # --- normalize time to DISPLAY_TZ safely ---
-    # 1) try parse without forcing utc to see if tz exists
-    t = pd.to_datetime(df[tcol], errors="coerce", utc=False)
-
-    if t.dt.tz is None:
-        # naive → interpret as UTC then convert to DISPLAY_TZ
-        t = pd.to_datetime(df[tcol], errors="coerce", utc=True)
-        t = t.dt.tz_convert(DISPLAY_TZ)
-    else:
-        # already tz-aware → convert to DISPLAY_TZ directly
-        t = t.dt.tz_convert(DISPLAY_TZ)
-
-    out = pd.DataFrame({"time": t})
-
-    if vcol is not None:
-        out["value"] = pd.to_numeric(df[vcol], errors="coerce")
-        out["volume"] = pd.to_numeric(df[volcol], errors="coerce") if (volcol and volcol in df.columns) else 0
-    else:
-        # wide table → equally-weighted mean
-        num_cols = [c for c in df.columns if c != tcol]
-        vals = df[num_cols].apply(lambda s: pd.to_numeric(s, errors="coerce"))
-        out["value"] = vals.mean(axis=1)
-        out["volume"] = 0
-
-    return out.dropna(subset=["time", "value"]).sort_values("time").reset_index(drop=True)
-
-def clamp_today_session_local(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only today's session in DISPLAY_TZ (default: 09:00–15:30)."""
-    if df.empty:
-        return df
-    today = pd.Timestamp.now(tz=DISPLAY_TZ).normalize()
-    start = pd.Timestamp(f"{today.date()} {SESSION_START}", tz=DISPLAY_TZ)
-    end   = pd.Timestamp(f"{today.date()} {SESSION_END}",   tz=DISPLAY_TZ)
-    m = (df["time"] >= start) & (df["time"] <= end)
-    return df.loc[m].reset_index(drop=True)
-
-def resample_minutes(df: pd.DataFrame, rule: str = "1min") -> pd.DataFrame:
-    if df.empty:
-        return df
-    tmp = df.set_index("time").sort_index()
-    out = tmp[["value"]].resample(rule).mean()
-    out["value"] = out["value"].interpolate(limit_direction="both")
-    out["volume"] = 0
-    return out.reset_index()
-
-def read_history(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["date", "value"])
-    df = pd.read_csv(path)
-    df = _lower(df)
-    if "date" not in df.columns or "value" not in df.columns:
-        return pd.DataFrame(columns=["date", "value"])
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    return df.dropna(subset=["date", "value"]).sort_values("date").reset_index(drop=True)
-
-# --------------- Plotting ---------------
-def plot_1d(i: pd.DataFrame, out_path: str):
-    fig, ax = plt.subplots(figsize=(16, 7), layout="constrained")
-    _decorate(ax, f"{INDEX_NAME} (1d)", "Time", "Index Value")
-
-    if i.empty:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
-                ha="center", va="center", alpha=0.6)
-        _save(fig, out_path)
-        return
-
-    first = i["value"].iloc[0]
-    last  = i["value"].iloc[-1]
-    if pd.isna(first) or pd.isna(last):
-        color = FLAT_COLOR
-    else:
-        diff = last - first
-        color = UP_COLOR if diff > 0 else (DOWN_COLOR if diff < 0 else FLAT_COLOR)
-
-    ax.plot(i["time"], i["value"], linewidth=2.6, color=color)
-    _save(fig, out_path)
-
-def plot_hist(h: pd.DataFrame, tail_n: int, label: str, out_path: str):
-    fig, ax = plt.subplots(figsize=(16, 7), layout="constrained")
-    _decorate(ax, f"{INDEX_NAME} ({label})", "Date", "Index Value")
-    hh = h.tail(tail_n)
-
-    if len(hh) >= 2:
-        ax.plot(hh["date"], hh["value"], linewidth=2.2, color=ACCENT)
-    elif len(hh) == 1:
-        ax.plot(hh["date"], hh["value"], marker="o", markersize=6, linewidth=0, color=ACCENT)
-        y = hh["value"].iloc[0]
-        ax.set_ylim(y - 0.1, y + 0.1)
-        ax.text(0.5, 0.5, "Only 1 point (need ≥ 2)", transform=ax.transAxes,
-                ha="center", va="center", alpha=0.5)
-    else:
-        ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
-                ha="center", va="center", alpha=0.5)
-
-    _save(fig, out_path)
-
-# --------------- Main ---------------
+# ====== Main ======
 def main():
+    index_key = os.environ.get("INDEX_KEY", "").strip().lower() or \
+                os.path.basename(os.getcwd()).strip().lower()
+    index_name = index_key.upper().replace("_", "")
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-    intraday_csv = os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_intraday.csv")
-    history_csv  = os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_history.csv")
+    intraday_csv = os.path.join(OUTPUTS_DIR, f"{index_key}_intraday.csv")
+    history_csv  = os.path.join(OUTPUTS_DIR, f"{index_key}_history.csv")
 
     # ---- 1d ----
     try:
         i = read_any_intraday(intraday_csv)
-        i = clamp_today_session_local(i)
+        i = clamp_session_on_last_day(i)     # ← 直近日のセッションで切り出し（A の対応）
         i = resample_minutes(i, "1min")
     except Exception as e:
         print(f"[WARN] intraday load failed: {e}")
         i = pd.DataFrame(columns=["time", "value", "volume"])
 
-    plot_1d(i, os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_1d.png"))
+    fig, ax = plt.subplots(figsize=(16, 7), layout="constrained")
+    _decorate(ax, f"{index_name} (1d)", "Time", "Index Value")
+    if not i.empty:
+        first_v = float(i["value"].iloc[0])
+        last_v  = float(i["value"].iloc[-1])
+        color = UP_COLOR if last_v >= first_v else DN_COLOR
+        ax.plot(i["time"], i["value"], linewidth=2.4, color=color)
+    else:
+        ax.text(0.5, 0.5, "No data", transform=ax.transAxes, ha="center", va="center", alpha=0.6)
+    _save(fig, os.path.join(OUTPUTS_DIR, f"{index_key}_1d.png"))
 
     # ---- 7d / 1m / 1y ----
     h = read_history(history_csv)
-    plot_hist(h, 7,   "7d", os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_7d.png"))
-    plot_hist(h, 30,  "1m", os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_1m.png"))
-    plot_hist(h, 365, "1y", os.path.join(OUTPUTS_DIR, f"{INDEX_KEY}_1y.png"))
 
-    # Last-run memo
+    def plot_hist(tail_n: int, label: str, out: str):
+        fig, ax = plt.subplots(figsize=(16, 7), layout="constrained")
+        _decorate(ax, f"{index_name} ({label})", "Date", "Index Value")
+        hh = h.tail(tail_n)
+        if len(hh) >= 2:
+            ax.plot(hh["date"], hh["value"], linewidth=2.2, color=ACCENT)
+        elif len(hh) == 1:
+            ax.plot(hh["date"], hh["value"], marker="o", markersize=6, linewidth=0, color=ACCENT)
+            y = hh["value"].iloc[0]
+            ax.set_ylim(y - 0.1, y + 0.1)
+            ax.text(0.5, 0.5, "Only 1 point (need ≥ 2)", transform=ax.transAxes,
+                    ha="center", va="center", alpha=0.5)
+        else:
+            ax.text(0.5, 0.5, "No data", transform=ax.transAxes,
+                    ha="center", va="center", alpha=0.5)
+        _save(fig, os.path.join(OUTPUTS_DIR, out))
+
+    plot_hist(7,   "7d", f"{index_key}_7d.png")
+    plot_hist(30,  "1m", f"{index_key}_1m.png")
+    plot_hist(365, "1y", f"{index_key}_1y.png")
+
+    # 実行記録
     with open(os.path.join(OUTPUTS_DIR, "_last_run.txt"), "w") as f:
-        f.write(pd.Timestamp.now(tz=DISPLAY_TZ).isoformat())
+        f.write(pd.Timestamp.now(tz=JP_TZ).isoformat())
 
 if __name__ == "__main__":
     main()
