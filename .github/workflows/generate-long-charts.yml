@@ -61,6 +61,8 @@ jobs:
           ls -1 docs/outputs/*.png 2>/dev/null || true
           echo "Existing markers:"
           ls -1 docs/outputs/*_post_intraday.txt 2>/dev/null || true
+          echo "Existing stats:"
+          ls -1 docs/outputs/*_stats.json 2>/dev/null || true
 
       # intraday → history 追記（存在しなくてもスキップ）
       - name: Append daily history from intraday
@@ -103,7 +105,6 @@ jobs:
         run: |
           set -e
           OUTDIR="docs/outputs"
-
           fix() {
             local wrong="$1"
             local right="$2"
@@ -112,7 +113,6 @@ jobs:
               mv -f "$wrong" "$right"
             fi
           }
-
           case "$INDEX_KEY" in
             ain10)
               fix "$OUTDIR/ain_10_post_intraday.txt" "$OUTDIR/ain10_post_intraday.txt"
@@ -125,14 +125,12 @@ jobs:
               fix "$OUTDIR/r_bank9_post_intraday.txt" "$OUTDIR/rbank9_post_intraday.txt"
               ;;
             astra4)
-              # astra4 は誤名なし想定（必要に応じて追加）
               :
               ;;
             *)
               :
               ;;
           esac
-
           echo "Markers after normalization:"
           ls -1 "$OUTDIR"/*_post_intraday.txt 2>/dev/null || true
 
@@ -144,6 +142,8 @@ jobs:
           ls -1 docs/outputs/*.png 2>/dev/null || true
           echo "Txt markers:"
           ls -1 docs/outputs/*_post_intraday.txt 2>/dev/null || true
+          echo "Stats JSON:"
+          ls -1 docs/outputs/*_stats.json 2>/dev/null || true
           echo "-- git status --"
           git status --porcelain
 
@@ -152,7 +152,7 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/*.png docs/outputs/*history.csv docs/outputs/*_post_intraday.txt 2>/dev/null || true
+          git add docs/outputs/*.png docs/outputs/*history.csv docs/outputs/*_post_intraday.txt docs/outputs/*_stats.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
