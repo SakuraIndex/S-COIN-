@@ -20,7 +20,7 @@ def _apply(ax, title):
     fig = ax.figure; fig.set_size_inches(12, 7); fig.set_dpi(160)
     fig.patch.set_facecolor(DARK_BG); ax.set_facecolor(DARK_AX)
     for sp in ax.spines.values(): sp.set_color(GRID)
-    ax.grid(color=GRID, alpha=0.6, linewidth=0.8)
+    ax.grid(color=GRID, alpha=0.6, linewidth=0.8)          # ← グリッド強化
     ax.tick_params(colors=FG_TEXT, labelsize=10)
     ax.yaxis.get_major_formatter().set_scientific(False)
     ax.set_title(title, color=FG_TEXT, fontsize=12)
@@ -53,12 +53,10 @@ def gen_pngs():
 def write_stats():
     """
     S-COIN+ は intraday が %単位。
-    → 1日騰落率[%] = last_value
+    → 騰落率[%] = last_value
     """
     df = _load_df(); col = df.columns[-1]
-    pct = None
-    if len(df):
-        pct = float(df[col].iloc[-1])
+    pct = float(df[col].iloc[-1]) if len(df) else None
 
     payload = {
         "index_key": INDEX_KEY,
@@ -67,8 +65,11 @@ def write_stats():
         "updated_at": pd.Timestamp.utcnow().isoformat(timespec="seconds") + "Z",
     }
     (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
     if pct is not None:
-        (OUTDIR / f"{INDEX_KEY}_post_intraday.txt").write_text(f"{INDEX_KEY.upper()} 1d: {pct:+.2f}%\n", encoding="utf-8")
+        (OUTDIR / f"{INDEX_KEY}_post_intraday.txt").write_text(
+            f"{INDEX_KEY.upper()} 1d: {pct:+.2f}%\n", encoding="utf-8"
+        )
 
 if __name__ == "__main__":
     gen_pngs()
