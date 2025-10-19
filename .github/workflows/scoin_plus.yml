@@ -1,30 +1,98 @@
-name: Run S-COIN+ intraday
+name: S-COIN+ • long charts & intraday percent
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 平日 09:00–17:30 JST（=00:00–08:30 UTC）に10分おき
+    - cron: "*/10 0-8 * * 1-5"
 
 permissions:
   contents: write
 
-on:
-  schedule:
-    - cron: "35 6 * * *"   # 毎日 15:35 JST
-  workflow_dispatch:
+concurrency:
+  group: scoin-plus-long
+  cancel-in-progress: false
+
+env:
+  INDEX_KEY: scoin_plus
+  OUT_DIR: docs/outputs
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          python-version: "3.10"
-      - run: pip install -r requirements.txt
-      - name: Run S-COIN+ intraday
-        run: python src/scoin_plus_intraday.py
-      - name: Commit and push outputs
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add docs/outputs/*
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # ── 長期チャート生成（％化・白軸） ──
+      - name: Ensure plot script exists
+        run: |
+          test -f scripts/long_charts.py || (echo "scripts/long_charts.py not found" && exit 2)
+
+      - name: Generate long-term charts
+        run: |
+          set -euxo pipefail
+          python scripts/long_charts.py
+          ls -la docs/outputs || true
+
+      # ── 1d確定データ → stats.json（仮）作成 ──
+      - name: Compute 1d percent (from 1d.csv)
+        run: |
+          set -euxo pipefail
+          python scripts/ain10_pct_post.py \
+            --index-key "${INDEX_KEY}" \
+            --csv "${OUT_DIR}/${INDEX_KEY}_1d.csv" \
+            --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
+            --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+            --basis open || true
+          head -c 400 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
+
+      # ── intraday速報データで stats.json を上書き ──
+      - name: Make intraday post & override stats.json
+        run: |
+          set -euxo pipefail
+          if [ -f "${OUT_DIR}/${INDEX_KEY}_intraday.csv" ]; then
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
+              --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+              --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json"
+            echo "--- TXT variants ---"
+            for f in \
+              "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+              "${OUT_DIR}/${INDEX_KEY}_intraday_post.txt"; do
+              [ -f "$f" ] && (echo "$f"; sed -n '1p' "$f")
+            done
+            echo "--- stats.json (intraday-based) ---"
+            head -c 400 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
+          else
+            echo "WARN: ${OUT_DIR}/${INDEX_KEY}_intraday.csv not found."
+          fi
+
+      - name: Commit outputs if changed
+        run: |
+          set -euxo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs/outputs
           if ! git diff --cached --quiet; then
-            git commit -m "Update S-COIN+ intraday snapshot"
+            git commit -m "chore(charts): update ${INDEX_KEY} (1d/7d/1m/1y + stats + intraday)"
             git push
+          else
+            echo "No changes to commit."
           fi
