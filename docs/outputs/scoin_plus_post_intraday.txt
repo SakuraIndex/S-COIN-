@@ -1,1 +1,1 @@
-SCOIN_PLUS 1d: Δ=N/A (level) A%=N/A (basis=no_session sess=09:00-15:30 valid=2025-10-17 00:00:00->2025-10-17 06:20:00)
+SCOIN_PLUS 1d: Δ=-0.885098 (level) A%=-13.74% (basis=open@09:00 sess=09:00-15:30 valid=2025-10-17 09:00:00->2025-10-17 15:20:00)
