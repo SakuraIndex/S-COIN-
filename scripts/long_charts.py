@@ -13,6 +13,8 @@ OUT_DIR = Path("docs/outputs"); OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TRADING_START = os.environ.get("TRADING_START", "09:00")
 TRADING_END   = os.environ.get("TRADING_END",   "15:30")
+INTRADAY_TZ = os.environ.get("INTRADAY_TZ", "UTC")
+TZ_OFFSET_HOURS = int(os.environ.get("TZ_OFFSET_HOURS", "9"))
 
 EPS = 5.0
 CLAMP_PCT = 30.0
@@ -31,14 +33,17 @@ def load_csv(p: Path) -> pd.DataFrame:
     ts_col, val_col = df.columns[:2]
     df = df.rename(columns={ts_col:"ts", val_col:"val"})
     df["ts"] = pd.to_datetime(df["ts"], utc=False, errors="coerce")
-    return df.dropna(subset=["ts","val"]).sort_values("ts").reset_index(drop=True)
+    df = df.dropna(subset=["ts","val"]).sort_values("ts").reset_index(drop=True)
+    if INTRADAY_TZ.upper() == "UTC":
+        df["ts"] = df["ts"] + pd.Timedelta(hours=TZ_OFFSET_HOURS)
+    return df
 
 def session_mask(series: pd.Series) -> pd.Series:
     sh, sm = map(int, TRADING_START.split(":"))
     eh, em = map(int, TRADING_END.split(":"))
-    s_ok = (series.dt.hour > sh) | ((series.dt.hour == sh) & (series.dt.minute >= sm))
-    e_ok = (series.dt.hour < eh) | ((series.dt.hour == eh) & (series.dt.minute <= em))
-    return s_ok & e_ok
+    after_open  = (series.dt.hour > sh) | ((series.dt.hour == sh) & (series.dt.minute >= sm))
+    before_close= (series.dt.hour < eh) | ((series.dt.hour == eh) & (series.dt.minute <= em))
+    return after_open & before_close
 
 def clamp_pct(p):
     if p > CLAMP_PCT: return CLAMP_PCT
