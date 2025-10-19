@@ -1,10 +1,9 @@
-name: S-COIN+ • charts & intraday percent (trading-session)
+name: S-COIN+ • charts & intraday percent (session 09:00-15:30 JST)
 
 on:
   workflow_dispatch:
   schedule:
     # 平日 09:00–15:30 JST（= 00:00–06:30 UTC）に10分おき
-    # 06:30 ちょうどは cron で刻めないため、0–6時台で実行＋スクリプト側で9:00–15:30のデータだけを採用
     - cron: "*/10 0-6 * * 1-5"
 
 permissions:
@@ -17,9 +16,12 @@ concurrency:
 env:
   INDEX_KEY: scoin_plus
   OUT_DIR: docs/outputs
-  # 取引時間（JST 想定）— スクリプトがこれでフィルタ＆寄り基準を決める
+  # 取引時間（JST）
   TRADING_START: "09:00"
   TRADING_END: "15:30"
+  # CSVの時刻タイムゾーンを明示（UTC なら JST に +9h してからセッション判定）
+  INTRADAY_TZ: "UTC"          # "UTC" | "JST"
+  TZ_OFFSET_HOURS: "9"        # INTRADAY_TZ=UTC のとき JST=UTC+9
 
 jobs:
   build:
@@ -42,17 +44,8 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          python - <<'PY'
-          import os, sys, matplotlib
-          print("=== DIAG ===")
-          print("Python:", sys.version.split()[0])
-          print("Matplotlib:", getattr(matplotlib, "__version__", "n/a"))
-          print("INDEX_KEY=", os.environ.get("INDEX_KEY"))
-          print("TRADING_START=", os.environ.get("TRADING_START"))
-          print("TRADING_END=", os.environ.get("TRADING_END"))
-          PY
 
-      # ───────── チャート（％表示・白軸） ─────────
+      # ── チャート（％ & 白軸） ──
       - name: Ensure plotting script exists
         run: |
           test -f scripts/long_charts.py || (echo "scripts/long_charts.py NOT FOUND" && exit 2)
@@ -61,12 +54,10 @@ jobs:
         run: |
           set -euxo pipefail
           python scripts/long_charts.py
-          echo "=== ls docs/outputs ==="
           ls -la docs/outputs || true
 
-      # ───────── 1d 騰落率（寄り=09:00以降の最初の有効値／取引時間のみ） ─────────
-      # まず 1d.csv から基礎値（あれば）を作り、その後 intraday で上書き。どちらも取引時間ロジックに従う。
-      - name: Seed stats from 1d.csv (fallback)
+      # ── 1d 騰落率（寄り=09:00以降の最初の有効値／JSTセッション限定） ──
+      - name: Seed stats from 1d.csv (optional)
         run: |
           set -euxo pipefail
           if [ -f "${OUT_DIR}/${INDEX_KEY}_1d.csv" ]; then
@@ -95,17 +86,6 @@ jobs:
             echo "WARN: ${OUT_DIR}/${INDEX_KEY}_intraday.csv not found (keep seed)"
           fi
 
-      - name: Upload artifacts (debug)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scoin-plus-outputs
-          path: |
-            docs/outputs/*.csv
-            docs/outputs/*.png
-            docs/outputs/*post*.txt
-            docs/outputs/*stats*.json
-
       - name: Commit outputs if changed
         run: |
           set -euxo pipefail
@@ -113,7 +93,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A docs/outputs
           if ! git diff --cached --quiet; then
-            git commit -m "chore(charts): update ${INDEX_KEY} (session 09:00-15:30; 1d/7d/1m/1y + stats + intraday)"
+            git commit -m "chore(charts): update ${INDEX_KEY} (JST session 09:00-15:30; 1d/7d/1m/1y + stats + intraday)"
             git push
           else
             echo "No changes to commit."
