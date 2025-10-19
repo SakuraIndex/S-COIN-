@@ -28,7 +28,7 @@ def read_intraday(csv_path: Path) -> pd.DataFrame:
     df = df.rename(columns={ts_col: "ts", val_col: "val"})
     df["ts"] = pd.to_datetime(df["ts"], utc=False, errors="coerce")
     df = df.dropna(subset=["ts", "val"]).sort_values("ts").reset_index(drop=True)
-    # ---- 時刻をJSTへ（CSVがUTCなら +9h）----
+    # CSVがUTCなら JST(+9h) にシフト
     if INTRADAY_TZ.upper() == "UTC":
         df["ts"] = df["ts"] + pd.Timedelta(hours=TZ_OFFSET_HOURS)
     return df
@@ -41,6 +41,7 @@ def session_mask(series: pd.Series) -> pd.Series:
     return after_open & before_close
 
 def choose_open_baseline(df_day: pd.DataFrame):
+    """9:00以降の最初の有効値を基準に（|val|>=EPS を優先）"""
     df_sess = df_day.loc[session_mask(df_day["ts"])].copy()
     if df_sess.empty:
         return None, "no_session"
@@ -69,14 +70,23 @@ def main():
 
     df = read_intraday(Path(args.csv))
     if df.empty:
-        txt = f"{args.index_key.upper()} intraday: (no data)\n"
-        Path(args.out_text).write_text(txt, encoding="utf-8")
-        Path(args.out_json).write_text(json.dumps({
-            "index_key": args.index_key, "pct_1d": None, "delta_level": None,
-            "scale": "percent", "basis": "no_data", "updated_at": iso_now()
-        }, ensure_ascii=False), encoding="utf-8"))
+        Path(args.out_text).write_text(
+            f"{args.index_key.upper()} intraday: (no data)\n", encoding="utf-8"
+        )
+        Path(args.out_json).write_text(
+            json.dumps({
+                "index_key": args.index_key,
+                "pct_1d": None,
+                "delta_level": None,
+                "scale": "percent",
+                "basis": "no_data",
+                "updated_at": iso_now(),
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
         return
 
+    # 当日のみ
     the_day = df["ts"].dt.floor("D").iloc[-1]
     df_day = df[df["ts"].dt.floor("D") == the_day].copy()
 
@@ -95,22 +105,24 @@ def main():
 
     pct_str = "N/A" if pct_val is None else f"{pct_val:+.2f}%"
     delta_str = "N/A" if delta_level is None else f"{delta_level:+.6f}"
-    txt = (
+    Path(args.out_text).write_text(
         f"{args.index_key.upper()} 1d: Δ={delta_str} (level) "
         f"A%={pct_str} (basis={basis_note} sess={TRADING_START}-{TRADING_END} "
-        f"valid={first_ts}->{last_ts})\n"
+        f"valid={first_ts}->{last_ts})\n",
+        encoding="utf-8",
     )
-    Path(args.out_text).write_text(txt, encoding="utf-8")
 
-    payload = {
-        "index_key": args.index_key,
-        "pct_1d": None if pct_val is None else float(pct_val),
-        "delta_level": None if delta_level is None else float(delta_level),
-        "scale": "percent",
-        "basis": basis_note,
-        "updated_at": iso_now(),
-    }
-    Path(args.out_json).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    Path(args.out_json).write_text(
+        json.dumps({
+            "index_key": args.index_key,
+            "pct_1d": None if pct_val is None else float(pct_val),
+            "delta_level": None if delta_level is None else float(delta_level),
+            "scale": "percent",
+            "basis": basis_note,
+            "updated_at": iso_now(),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 if __name__ == "__main__":
     main()
