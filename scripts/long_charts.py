@@ -1,157 +1,117 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-S-COIN+ charts + stats  (pct scale, dark theme)
-"""
+
+import os
 from pathlib import Path
-import json
-from datetime import datetime, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from matplotlib.dates import AutoDateLocator, AutoDateFormatter
 
-# ------------------------
-# constants / paths
-# ------------------------
-INDEX_KEY = "scoin_plus"
-OUTDIR = Path("docs/outputs")
-OUTDIR.mkdir(parents=True, exist_ok=True)
+# ===== プロジェクト設定 =====
+INDEX_KEY = os.environ.get("INDEX_KEY", "scoin_plus")
+OUT_DIR = Path("docs/outputs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-HISTORY_CSV  = OUTDIR / f"{INDEX_KEY}_history.csv"
-INTRADAY_CSV = OUTDIR / f"{INDEX_KEY}_intraday.csv"
+# ===== ％計算の安全ガード（暗号はボラ高めのため少し広め） =====
+EPS = 5.0          # 分母の下限
+CLAMP_PCT = 50.0   # 仕上がりの上限（±50%）
 
-# ------------------------
-# plotting style (dark)
-# ------------------------
-DARK_BG = "#0e0f13"
-DARK_AX = "#0b0c10"
-FG_TEXT = "#e7ecf1"
-GRID    = "#2a2e3a"
-RED     = "#ff6b6b"
+# ===== ダークテーマ（軸・文字は白で統一） =====
+def apply_dark_theme(fig, ax):
+    fig.patch.set_facecolor("#111317")
+    ax.set_facecolor("#111317")
+    for s in ax.spines.values():
+        s.set_visible(False)
+    ax.tick_params(axis="both", colors="#ffffff", labelsize=10)
+    ax.yaxis.label.set_color("#ffffff")
+    ax.xaxis.label.set_color("#ffffff")
+    ax.title.set_color("#ffffff")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18, color="#ffffff")
+    ax.grid(True, which="minor", linestyle="-", linewidth=0.4, alpha=0.10, color="#ffffff")
 
-def _apply(ax, title: str) -> None:
-    fig = ax.figure
-    fig.set_size_inches(12, 7)
-    fig.set_dpi(160)
-    fig.patch.set_facecolor(DARK_BG)
-    ax.set_facecolor(DARK_AX)
-    for sp in ax.spines.values():
-        sp.set_color(GRID)
-    ax.grid(color=GRID, alpha=0.6, linewidth=0.8)
-    ax.tick_params(colors=FG_TEXT, labelsize=10)
-    ax.yaxis.get_major_formatter().set_scientific(False)
-    ax.set_title(title, color=FG_TEXT, fontsize=12)
-    ax.set_xlabel("Time", color=FG_TEXT, fontsize=10)
-    ax.set_ylabel("Index / Value", color=FG_TEXT, fontsize=10)
+def force_all_white(ax):
+    ax.tick_params(axis="both", colors="#ffffff")
+    for t in ax.get_xticklabels() + ax.get_yticklabels():
+        t.set_color("#ffffff")
+    ax.xaxis.label.set_color("#ffffff")
+    ax.yaxis.label.set_color("#ffffff")
+    ax.title.set_color("#ffffff")
 
-def _save(df: pd.DataFrame, col: str, out_png: Path, title: str) -> None:
-    fig, ax = plt.subplots()
-    _apply(ax, title)
-    ax.plot(df.index, df[col], color=RED, linewidth=1.6)
-    fig.savefig(out_png, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-
-# ------------------------
-# data loading helpers
-# ------------------------
-def _pick_index_column(df: pd.DataFrame) -> str:
-    """
-    優先順位で S-COIN+ 列を決定。無ければ最後の列を使う。
-    """
-    # 正規化して比較（記号・アンダースコアの差異も吸収）
-    def norm(s: str) -> str:
-        return (
-            s.strip().lower()
-             .replace("+", "plus")
-             .replace("-", "")
-             .replace("_", "")
-        )
-
-    targets = {
-        "scoinplus", "scoin", "scoinplu",  # 包含のため複数
-        norm(INDEX_KEY), norm(INDEX_KEY.upper()), "scoinplusindex",
-        "scoin_plus", "s_coin_plus", "scoin_pls"
-    }
-    ncols = {c: norm(c) for c in df.columns}
-    for c, nc in ncols.items():
-        if nc in targets:
-            return c
-    # fallback: 最後の列
-    return df.columns[-1]
-
-def _load_df() -> pd.DataFrame:
-    """
-    intraday があれば intraday 優先、無ければ history。
-    先頭列を DatetimeIndex にして NA を落とす。
-    """
-    if INTRADAY_CSV.exists():
-        df = pd.read_csv(INTRADAY_CSV, parse_dates=[0], index_col=0)
-    elif HISTORY_CSV.exists():
-        df = pd.read_csv(HISTORY_CSV, parse_dates=[0], index_col=0)
-    else:
-        raise FileNotFoundError("S-COIN+: neither intraday nor history csv found.")
-    df = df.dropna(how="all")
-    # 数値化できる列だけ残す
-    for c in list(df.columns):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(how="all")
+# ===== I/O =====
+def load_csv(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    if df.shape[1] < 2:
+        raise ValueError(f"CSV needs >= 2 columns: {csv_path}")
+    ts_col, val_col = df.columns[:2]
+    df = df.rename(columns={ts_col: "ts", val_col: "val"})
+    df["ts"] = pd.to_datetime(df["ts"], utc=False, errors="coerce")
+    df = df.dropna(subset=["ts", "val"]).sort_values("ts").reset_index(drop=True)
     return df
 
-# ------------------------
-# chart generation
-# ------------------------
-def gen_pngs() -> None:
-    df = _load_df()
-    col = _pick_index_column(df)
+def stable_baseline(df_day: pd.DataFrame) -> float | None:
+    if df_day.empty:
+        return None
+    mask = (df_day["ts"].dt.hour > 10) | ((df_day["ts"].dt.hour == 10) & (df_day["ts"].dt.minute >= 0))
+    cand = df_day.loc[mask & (df_day["val"].abs() >= EPS)]
+    if not cand.empty:
+        return float(cand.iloc[0]["val"])
+    cand2 = df_day.loc[df_day["val"].abs() >= EPS]
+    if not cand2.empty:
+        return float(cand2.iloc[0]["val"])
+    return float(df_day.iloc[0]["val"])
 
-    tail_1d = df.tail(1000)
-    tail_7d = df.tail(7 * 1000)
+def calc_pct(base: float, x: float) -> float:
+    denom = max(abs(base), abs(x), EPS)
+    pct = (x - base) / denom * 100.0
+    if pct > CLAMP_PCT: pct = CLAMP_PCT
+    if pct < -CLAMP_PCT: pct = -CLAMP_PCT
+    return pct
 
-    _save(tail_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d)")
-    _save(tail_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y)")
-
-# ------------------------
-# stats (pct) + marker writers
-# ------------------------
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-def write_stats_and_marker() -> None:
-    """
-    仕様:
-      - intraday の S-COIN+ 列は “百分率[%]” を直接保持（例: -0.57 は -0.57%）
-      - サイト側も pct として読む（scale="pct"）
-      - post_intraday.txt には "+/-xx.xx%" を出力
-    """
-    df = _load_df()
-    col = _pick_index_column(df)
-
-    pct = None
-    if len(df.index) > 0:
-        last = df[col].iloc[-1]
-        if pd.notna(last):
-            pct = float(last)
-
-    payload = {
-        "index_key": INDEX_KEY,
-        "pct_1d": None if pct is None else round(pct, 6),
-        "scale": "pct",
-        "updated_at": _now_utc_iso(),
-    }
-    (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(
-        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-    )
-
-    marker = OUTDIR / f"{INDEX_KEY}_post_intraday.txt"
-    if pct is None:
-        marker.write_text(f"{INDEX_KEY.upper()} 1d: N/A\n", encoding="utf-8")
+def make_pct_series(df: pd.DataFrame, span: str) -> pd.DataFrame:
+    if df.empty: return df
+    if span == "1d":
+        the_day = df["ts"].dt.floor("D").iloc[-1]
+        df_day = df[df["ts"].dt.floor("D") == the_day].copy()
+        if df_day.empty: return df_day
+        base = stable_baseline(df_day)
+        if base is None: return pd.DataFrame()
+        df_day["pct"] = df_day["val"].apply(lambda v: calc_pct(base, v))
+        return df_day
     else:
-        marker.write_text(f"{INDEX_KEY.upper()} 1d: {pct:+.2f}%\n", encoding="utf-8")
+        last = df["ts"].max()
+        days = {"7d": 7, "1m": 30, "1y": 365}.get(span, 7)
+        df_span = df[df["ts"] >= (last - pd.Timedelta(days=days))].copy()
+        if df_span.empty: return df_span
+        base = float(df_span.iloc[0]["val"])
+        df_span["pct"] = df_span["val"].apply(lambda v: calc_pct(base, v))
+        return df_span
 
-# ------------------------
-# main
-# ------------------------
+def plot_one(df_pct: pd.DataFrame, title: str, out_png: Path):
+    fig, ax = plt.subplots(figsize=(16, 8), dpi=110)
+    apply_dark_theme(fig, ax)
+    ax.set_title(title, fontsize=26, fontweight="bold", pad=18)
+    ax.set_xlabel("Time", labelpad=10)
+    ax.set_ylabel("Change (%)", labelpad=10)
+    ax.plot(df_pct["ts"].values, df_pct["pct"].values, linewidth=2.6, color="#ff615a")
+    major = AutoDateLocator(minticks=5, maxticks=10)
+    ax.xaxis.set_major_locator(major)
+    ax.xaxis.set_major_formatter(AutoDateFormatter(major))
+    ax.yaxis.set_minor_locator(MaxNLocator(nbins=50))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=7))
+    force_all_white(ax)
+    fig.tight_layout()
+    fig.savefig(out_png, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+def main():
+    for span in ["1d", "7d", "1m", "1y"]:
+        csv = OUT_DIR / f"{INDEX_KEY}_{span}.csv"
+        if not csv.exists(): continue
+        df = load_csv(csv)
+        dfp = make_pct_series(df, span)
+        if dfp is None or dfp.empty or "pct" not in dfp: continue
+        plot_one(dfp, f"{INDEX_KEY.upper()} ({span})", OUT_DIR / f"{INDEX_KEY}_{span}.png")
+
 if __name__ == "__main__":
-    gen_pngs()
-    write_stats_and_marker()
+    main()
