@@ -16,7 +16,7 @@ env:
   # セッション指定（JST）
   SESSION_START: "09:00"
   SESSION_END: "15:30"
-  DAY_ANCHOR: "09:00"   # その日の起点（open@09:00 の基準に使う）
+  DAY_ANCHOR: "09:00"   # open@09:00 の基準
 
 jobs:
   build:
@@ -31,7 +31,7 @@ jobs:
           persist-credentials: true
 
       - name: Setup Python 3.11
-       .uses: actions/setup-python@v5
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
