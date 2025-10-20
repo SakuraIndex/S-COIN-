@@ -60,7 +60,7 @@ jobs:
 
       - name: Generate intraday post and snapshot
         env:
-          INDEX_KEY: scoin_plus
+          INDEX_KEY: "S-COIN+"  # CSVの列名に合わせる
           CSV: docs/outputs/scoin_plus_intraday.csv
           OUT_JSON: docs/outputs/scoin_plus_stats.json
           OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
@@ -69,7 +69,7 @@ jobs:
           SESSION_END:   ${{ inputs.session_end }}
           DAY_ANCHOR:    ${{ inputs.day_anchor }}
           BASIS:         ${{ inputs.basis }}
-          VALUE_TYPE:    percent   # CSVの値はすでに%（差分は last - anchor）
+          VALUE_TYPE:    percent   # CSVの値が%（差分=last - anchor）
         run: |
           set -euo pipefail
           echo "=== intraday snapshot ==="
