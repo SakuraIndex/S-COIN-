@@ -2,21 +2,21 @@ name: S-COIN+ • intraday snapshot (JST 09:00–15:30)
 
 on:
   workflow_dispatch:
-  schedule:
-    # 平日 09:00–15:30 JST = 00:00–06:30 UTC を5分おきに実行
-    # 06:30 ちょうどは cron で切れないため、0–6時台を走らせてスクリプト側のsessionで切り出します
-    - cron: "*/5 0-6 * * 1-5"
 
 permissions:
   contents: write
 
 concurrency:
-  group: scoin-plus-intraday
+  group: scoin_plus_intraday
   cancel-in-progress: false
 
 env:
   INDEX_KEY: scoin_plus
   OUT_DIR: docs/outputs
+  # セッション指定（JST）
+  SESSION_START: "09:00"
+  SESSION_END: "15:30"
+  DAY_ANCHOR: "09:00"   # その日の起点（open@09:00 の基準に使う）
 
 jobs:
   build:
@@ -28,9 +28,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+       .uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -45,23 +46,22 @@ jobs:
           set -euxo pipefail
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
 
-      - name: Generate intraday post & snapshot (JST session)
+      - name: Generate intraday post and snapshot
         run: |
           set -euxo pipefail
-          set -x  # 引数の実体をログに出す
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
-            --csv       "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
-            --out-json  "${OUT_DIR}/${INDEX_KEY}_stats.json" \
-            --out-text  "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+            --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
+            --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
+            --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
             --snapshot-png "${OUT_DIR}/${INDEX_KEY}_intraday.png" \
-            --session "09:00-15:30" \
-            --label "SCOIN_PLUS (1d)"
+            --session-start "${SESSION_START}" \
+            --session-end "${SESSION_END}" \
+            --day-anchor "${DAY_ANCHOR}" \
+            --basis "open@09:00"
 
           echo "--- ${INDEX_KEY}_post_intraday.txt ---"
-          sed -n '1,200p' "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" || true
-          echo "--- ${INDEX_KEY}_stats.json ---"
-          head -c 400 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
+          sed -n '1,120p' "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" || true
 
       - name: Upload artifacts (debug)
         if: always()
@@ -69,19 +69,19 @@ jobs:
         with:
           name: scoin-plus-intraday
           path: |
-            ${OUT_DIR}/*intraday*.csv
-            ${OUT_DIR}/*intraday*.png
-            ${OUT_DIR}/*post_intraday*.txt
-            ${OUT_DIR}/*stats*.json
+            docs/outputs/${{ env.INDEX_KEY }}_intraday.csv
+            docs/outputs/${{ env.INDEX_KEY }}_intraday.png
+            docs/outputs/${{ env.INDEX_KEY }}_post_intraday.txt
+            docs/outputs/${{ env.INDEX_KEY }}_stats.json
 
       - name: Commit outputs if changed
         run: |
           set -euxo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A "${OUT_DIR}"
+          git add -A docs/outputs
           if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update ${INDEX_KEY} (snapshot + post + stats, JST 09:00–15:30)"
+            git commit -m "chore(intraday): update S-COIN+ snapshot+post (JST 09:00–15:30)"
             git push
           else
             echo "No changes to commit."
