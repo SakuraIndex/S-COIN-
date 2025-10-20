@@ -5,6 +5,7 @@ make_intraday_post.py
 
 Intraday CSV を読み取り、投稿テキスト (.txt)・統計 (.json)・スナップショット画像 (.png) を生成。
 日本株（JST 09:00–15:30）を基本としつつ、24h銘柄にも対応。
+旧CLIオプション (--basis/--day-anchor/--session-start/--session-end) も受け付ける。
 """
 
 from __future__ import annotations
@@ -13,34 +14,26 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
 
 JST = "Asia/Tokyo"
 
-# ============================================================
-# Utility functions
-# ============================================================
+# ----------------------------- util -----------------------------
 
-def _find_ts_and_value_columns(df: pd.DataFrame,
-                               index_key: str | None = None) -> tuple[str, str]:
-    """
-    時刻列と値列を推定。
-    """
+def _find_ts_and_value_columns(df: pd.DataFrame, index_key: str | None) -> tuple[str, str]:
     lowered = {c.lower(): c for c in df.columns}
-
-    # 時刻列候補
-    for cand in ["ts", "timestamp", "time", "datetime", "date", "time_jst"]:
+    for cand in ["ts", "timestamp", "time", "datetime", "date", "time_jst", "datetime"]:
         if cand in lowered:
             ts_col = lowered[cand]
             break
     else:
-        raise ValueError("時刻列(ts/timestamp/time/datetime/date/time_jst)が見つかりません")
+        # 先頭列を時刻として試みる（最後の保険）
+        ts_col = df.columns[0]
 
-    # 値列推定
     value_col = None
     if index_key:
         for c in df.columns:
-            if c.lower() == index_key.lower() or c.lower().replace("+", "").replace("-", "") == index_key.lower():
+            lc = c.lower()
+            if lc == index_key.lower() or lc.replace("+", "") == index_key.lower():
                 value_col = c
                 break
 
@@ -62,12 +55,12 @@ def _find_ts_and_value_columns(df: pd.DataFrame,
     return ts_col, value_col
 
 
-def load_intraday(csv_path: str, index_key: str | None = None) -> pd.DataFrame:
-    """CSV 読み込みと時刻変換 (JST)"""
+def load_intraday(csv_path: str, index_key: str | None) -> pd.DataFrame:
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
-    ts_col, value_col = _find_ts_and_value_columns(df, index_key=index_key)
+    ts_col, value_col = _find_ts_and_value_columns(df, index_key)
 
     ts = pd.to_datetime(df[ts_col], errors="coerce")
+    # タイムゾーン整備（UTC/JST混在でもOKに）
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize(JST, nonexistent="shift_forward", ambiguous="NaT")
     else:
@@ -77,54 +70,39 @@ def load_intraday(csv_path: str, index_key: str | None = None) -> pd.DataFrame:
         "ts": ts,
         "value": pd.to_numeric(df[value_col], errors="coerce")
     }).dropna(subset=["ts"])
-
     out = out.sort_values("ts").drop_duplicates(subset=["ts"], keep="last").reset_index(drop=True)
     return out
 
 
 def filter_session(df: pd.DataFrame, session: str | None) -> pd.DataFrame:
-    """指定セッション（例: '09:00-15:30'）で絞り込み"""
-    if not session or session.lower() in ["24h", "all"]:
+    if df.empty or not session or session.lower() in ["all", "24h"]:
         return df
-
     if "-" not in session:
-        raise ValueError(f"セッション指定の形式が不正: {session}")
+        raise ValueError(f"セッション形式が不正です: {session!r}（例: 09:00-15:30）")
 
     start, end = session.split("-")
-    start_h, start_m = [int(x) for x in start.split(":")]
-    end_h, end_m = [int(x) for x in end.split(":")]
+    sh, sm = [int(x) for x in start.split(":")]
+    eh, em = [int(x) for x in end.split(":")]
 
+    # 基準日は最新データのJST日付
     day = df["ts"].iloc[-1].tz_convert(JST)
-    st = pd.Timestamp(day.year, day.month, day.day, start_h, start_m, tz=JST)
-    en = pd.Timestamp(day.year, day.month, day.day, end_h, end_m, tz=JST)
+    st = pd.Timestamp(day.year, day.month, day.day, sh, sm, tz=JST)
+    en = pd.Timestamp(day.year, day.month, day.day, eh, em, tz=JST)
     return df[(df["ts"] >= st) & (df["ts"] <= en)].copy()
 
 
-# ============================================================
-# Core calculations
-# ============================================================
-
 def calc_change_stats(df: pd.DataFrame) -> dict:
-    """セッション中の値変化・統計を算出"""
     if df.empty:
-        return {"change_pct": np.nan, "open": np.nan, "close": np.nan}
-
-    open_val = df["value"].iloc[0]
-    close_val = df["value"].iloc[-1]
-    change_pct = (close_val / open_val - 1.0) * 100.0 if open_val != 0 else np.nan
-
-    return {
-        "open": round(open_val, 4),
-        "close": round(close_val, 4),
-        "change_pct": round(change_pct, 2),
-    }
+        return {"open": np.nan, "close": np.nan, "change_pct": np.nan}
+    o = df["value"].iloc[0]
+    c = df["value"].iloc[-1]
+    pct = (c / o - 1.0) * 100.0 if o != 0 else np.nan
+    return {"open": round(o, 4), "close": round(c, 4), "change_pct": round(pct, 2)}
 
 
 def plot_snapshot(df: pd.DataFrame, label: str, out_png: str):
-    """Intraday Snapshot PNG生成"""
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=(12, 6), dpi=140)
-
     if df.empty:
         ax.text(0.5, 0.5, "No intraday data", ha="center", va="center", fontsize=14)
     else:
@@ -142,59 +120,76 @@ def plot_snapshot(df: pd.DataFrame, label: str, out_png: str):
     plt.close(fig)
 
 
-# ============================================================
-# Output generation
-# ============================================================
-
-def generate_post_text(index_key: str, stats: dict, out_text: str, label: str):
-    now_jst = pd.Timestamp.utcnow().tz_localize("UTC").tz_convert(JST)
-    time_str = now_jst.strftime("%Y/%m/%d %H:%M")
-
-    trend_symbol = "▲" if stats["change_pct"] > 0 else "▼" if stats["change_pct"] < 0 else "■"
+def generate_post_text(label: str, stats: dict, out_text: str):
+    now_jst = pd.Timestamp.utcnow().tz_localize("UTC").tz_convert(JST).strftime("%Y/%m/%d %H:%M")
+    sym = "▲" if stats["change_pct"] > 0 else "▼" if stats["change_pct"] < 0 else "■"
     change_str = f"{stats['change_pct']:+.2f}%" if not np.isnan(stats["change_pct"]) else "N/A"
-
     lines = [
-        f"{trend_symbol} {label} 日中取引 ({time_str})",
+        f"{sym} {label} 日中取引 ({now_jst})",
         f"{change_str}（前日終値比）",
-        f"※ 構成銘柄の等ウェイト平均",
-        f"#{label.replace(' ', '')} #日本株"
+        "※ 構成銘柄の等ウェイト平均",
+        f"#{label.replace(' ', '')} #日本株",
     ]
-
     with open(out_text, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-
-# ============================================================
-# Main
-# ============================================================
+# ----------------------------- main -----------------------------
 
 def main():
-    p = argparse.ArgumentParser(description="Generate intraday post and snapshot")
-    p.add_argument("--index-key", required=True)
-    p.add_argument("--csv", required=True)
-    p.add_argument("--out-json", required=True)
-    p.add_argument("--out-text", required=True)
-    p.add_argument("--snapshot-png", default=None)
-    p.add_argument("--session", default="09:00-15:30")
-    p.add_argument("--label", default=None)
-    args = p.parse_args()
+    ap = argparse.ArgumentParser(description="Generate intraday post/snapshot from CSV")
+    ap.add_argument("--index-key", required=True)
+    ap.add_argument("--csv", required=True)
+    ap.add_argument("--out-json", required=True)
+    ap.add_argument("--out-text", required=True)
+    ap.add_argument("--snapshot-png", default=None)
+    ap.add_argument("--session", default=None, help='例: "09:00-15:30", "24h", "all"')
+    ap.add_argument("--label", default=None)
+
+    # 旧オプション（互換用・受け取って内部で解釈）
+    ap.add_argument("--basis", default=None)            # 例: open@09:00 / stable@10:00（本スクリプトでは基準は「セッション先頭」固定・無視）
+    ap.add_argument("--day-anchor", default=None)       # 例: JST@09:00（無視）
+    ap.add_argument("--session-start", default=None)    # 例: 09:00
+    ap.add_argument("--session-end", default=None)      # 例: 15:30
+
+    args = ap.parse_args()
+
+    # 互換：--session-start/--session-end が来たら --session を組み立て
+    session = args.session
+    if not session and (args.session_start or args.session_end):
+        if not (args.session_start and args.session_end):
+            raise SystemExit("Both --session-start and --session-end are required when one is provided.")
+        session = f"{args.session_start}-{args.session_end}"
+
+    # デフォルト：日本株の取引時間
+    if session is None:
+        session = "09:00-15:30"
 
     label = args.label or args.index_key.upper()
 
     df = load_intraday(args.csv, index_key=args.index_key)
-    df = filter_session(df, args.session)
+    df = filter_session(df, session)
     stats = calc_change_stats(df)
 
+    # JSON
     with open(args.out_json, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+        json.dump({
+            "index_key": args.index_key,
+            "open": stats["open"],
+            "close": stats["close"],
+            "pct_1d": stats["change_pct"],
+            "scale": "percent",
+            "basis": f"session_open({session})",
+            "updated_at": pd.Timestamp.utcnow().isoformat()
+        }, f, ensure_ascii=False, indent=2)
 
-    generate_post_text(args.index_key, stats, args.out_text, label)
+    # TXT
+    generate_post_text(label, stats, args.out_text)
 
+    # PNG
     if args.snapshot_png:
         plot_snapshot(df, label, args.snapshot_png)
 
-    print(f"✅ Done: {args.index_key} {stats['change_pct']}%")
-
+    print(f"Done: {args.index_key} change={stats['change_pct']}% session={session}")
 
 if __name__ == "__main__":
     main()
