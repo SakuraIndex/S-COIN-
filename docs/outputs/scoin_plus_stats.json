@@ -1,12 +1,12 @@
 {
-  "index_key": "S-COIN+",
+  "index_key": "SCOIN_PLUS",
   "label": "S-COIN+",
-  "pct_intraday": 3.376,
-  "basis": "open@09:00",
+  "pct_intraday": 5.659884,
+  "basis": "prev_close",
   "session": {
     "start": "09:00",
     "end": "15:30",
     "anchor": "09:00"
   },
-  "updated_at": "2025-10-20T17:20:06.222520+09:00"
+  "updated_at": "2025-10-20T17:52:39.554067+09:00"
 }
