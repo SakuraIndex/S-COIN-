@@ -53,13 +53,14 @@ jobs:
         run: |
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
           test -f docs/outputs/scoin_plus_intraday.csv || (echo "Missing docs/outputs/scoin_plus_intraday.csv" && exit 2)
+          # simple HH:MM validation
           [[ "${{ inputs.session_start }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
           [[ "${{ inputs.session_end }}"   =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
           [[ "${{ inputs.day_anchor }}"    =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
 
       - name: Generate intraday post and snapshot
         env:
-          INDEX_KEY: "S-COIN+"
+          INDEX_KEY: scoin_plus
           CSV: docs/outputs/scoin_plus_intraday.csv
           OUT_JSON: docs/outputs/scoin_plus_stats.json
           OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
@@ -68,6 +69,7 @@ jobs:
           SESSION_END:   ${{ inputs.session_end }}
           DAY_ANCHOR:    ${{ inputs.day_anchor }}
           BASIS:         ${{ inputs.basis }}
+          VALUE_TYPE:    percent   # CSVの値はすでに%（差分は last - anchor）
         run: |
           set -euo pipefail
           echo "=== intraday snapshot ==="
@@ -76,6 +78,7 @@ jobs:
           echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
+          echo "VALUE_TYPE=${VALUE_TYPE}"
 
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -86,7 +89,8 @@ jobs:
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}"
+            --basis "${BASIS}" \
+            --value-type "${VALUE_TYPE}"
 
       - name: Upload artifacts (for debug)
         if: always()
