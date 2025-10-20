@@ -1,32 +1,26 @@
-name: S-COIN+ • charts & intraday percent (session 09:00-15:30 JST)
+name: S-COIN+ • intraday snapshot (JST 09:00–15:30)
 
 on:
   workflow_dispatch:
   schedule:
-    # 平日 09:00–15:30 JST（= 00:00–06:30 UTC）に10分おき
-    - cron: "*/10 0-6 * * 1-5"
+    # 平日 09:00–15:30 JST（= 00:00–06:30 UTC）に5分おき実行
+    - cron: "*/5 0-6 * * 1-5"
 
 permissions:
   contents: write
 
 concurrency:
-  group: scoin-plus-session
+  group: scoin-plus-intraday
   cancel-in-progress: false
 
 env:
   INDEX_KEY: scoin_plus
   OUT_DIR: docs/outputs
-  # 取引時間（JST）
-  TRADING_START: "09:00"
-  TRADING_END: "15:30"
-  # CSVの時刻タイムゾーンを明示（UTC なら JST に +9h してからセッション判定）
-  INTRADAY_TZ: "UTC"          # "UTC" | "JST"
-  TZ_OFFSET_HOURS: "9"        # INTRADAY_TZ=UTC のとき JST=UTC+9
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -44,56 +38,51 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python - <<'PY'
+          import sys
+          print("Python:", sys.version.split()[0])
+          PY
 
-      # ── チャート（％ & 白軸） ──
-      - name: Ensure plotting script exists
-        run: |
-          test -f scripts/long_charts.py || (echo "scripts/long_charts.py NOT FOUND" && exit 2)
-
-      - name: Generate long-term charts (1d/7d/1m/1y)
-        run: |
-          set -euxo pipefail
-          python scripts/long_charts.py
-          ls -la docs/outputs || true
-
-      # ── 1d 騰落率（寄り=09:00以降の最初の有効値／JSTセッション限定） ──
-      - name: Seed stats from 1d.csv (optional)
+      - name: Verify scripts exist
         run: |
           set -euxo pipefail
-          if [ -f "${OUT_DIR}/${INDEX_KEY}_1d.csv" ]; then
-            python scripts/make_intraday_post.py \
-              --index-key "${INDEX_KEY}" \
-              --csv "${OUT_DIR}/${INDEX_KEY}_1d.csv" \
-              --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
-              --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt"
-            head -c 400 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
-          else
-            echo "WARN: ${OUT_DIR}/${INDEX_KEY}_1d.csv not found (skip seed)"
-          fi
+          test -f scripts/make_intraday_post.py || (echo "scripts/make_intraday_post.py NOT FOUND" && exit 2)
+          ls -la ${OUT_DIR} || true
 
-      - name: Override with intraday.csv (session-based)
+      - name: Generate intraday post & snapshot (JST session)
         run: |
           set -euxo pipefail
-          if [ -f "${OUT_DIR}/${INDEX_KEY}_intraday.csv" ]; then
-            python scripts/make_intraday_post.py \
-              --index-key "${INDEX_KEY}" \
-              --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
-              --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
-              --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt"
-            echo "--- TXT ---"; sed -n '1p' "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" || true
-            echo "--- stats.json ---"; head -c 400 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
-          else
-            echo "WARN: ${OUT_DIR}/${INDEX_KEY}_intraday.csv not found (keep seed)"
-          fi
+          python scripts/make_intraday_post.py \
+            --index-key "${INDEX_KEY}" \
+            --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
+            --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
+            --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+            --snapshot-png "${OUT_DIR}/${INDEX_KEY}_intraday.png" \
+            --session "09:00-15:30" \
+            --label "SCOIN_PLUS (1d)"
+          echo "--- ${INDEX_KEY}_post_intraday.txt ---"
+          sed -n '1,80p' "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" || true
+          echo "--- ${INDEX_KEY}_stats.json ---"
+          head -c 300 "${OUT_DIR}/${INDEX_KEY}_stats.json" || true
+
+      - name: Upload artifacts (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scoin-plus-intraday
+          path: |
+            docs/outputs/${{ env.INDEX_KEY }}_intraday*.png
+            docs/outputs/${{ env.INDEX_KEY }}_post_intraday.txt
+            docs/outputs/${{ env.INDEX_KEY }}_stats.json
 
       - name: Commit outputs if changed
         run: |
           set -euxo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A docs/outputs
+          git add -A ${OUT_DIR}
           if ! git diff --cached --quiet; then
-            git commit -m "chore(charts): update ${INDEX_KEY} (JST session 09:00-15:30; 1d/7d/1m/1y + stats + intraday)"
+            git commit -m "chore(intraday): update ${INDEX_KEY} snapshot & post (JST 09:00–15:30)"
             git push
           else
             echo "No changes to commit."
