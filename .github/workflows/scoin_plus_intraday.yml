@@ -1,7 +1,6 @@
 name: S-COIN+ • intraday snapshot (JST 09:00–15:30)
 
 on:
-  # 手動実行ボタンを出すために必須
   workflow_dispatch:
     inputs:
       session_start:
@@ -13,35 +12,31 @@ on:
         required: true
         default: "15:30"
       day_anchor:
-        description: "Day anchor time used for labeling (HH:MM JST)"
+        description: "Day anchor time for labeling (HH:MM JST)"
         required: true
         default: "09:00"
       basis:
         description: "Return basis label (e.g., open@09:00)"
         required: true
         default: "open@09:00"
-  # 変更時に自動で検証させたいファイル（任意）
-  push:
-    paths:
-      - ".github/workflows/scoin_plus_intraday.yml"
-      - "scripts/make_intraday_post.py"
-      - "requirements.txt"
-      - "docs/outputs/scoin_plus_intraday.csv"
+
+permissions:
+  contents: write
 
 concurrency:
-  group: scoin_plus_intraday-${{ github.ref }}
-  cancel-in-progress: true
+  group: scoin-plus-intraday-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Setup Python 3.11
@@ -56,73 +51,67 @@ jobs:
 
       - name: Verify scripts & inputs exist
         run: |
-          set -euo pipefail
-          test -f scripts/make_intraday_post.py || { echo "Missing scripts/make_intraday_post.py"; exit 2; }
-          test -f docs/outputs/scoin_plus_intraday.csv || { echo "Missing docs/outputs/scoin_plus_intraday.csv"; exit 2; }
-
-          # 入力検証（HH:MM 形式のみ許可）
-          re='^[0-2][0-9]:[0-5][0-9]$'
-          for v in "${{ inputs.session_start }}" "${{ inputs.session_end }}" "${{ inputs.day_anchor }}"; do
-            if ! [[ "$v" =~ $re ]]; then
-              echo "Invalid time format: $v (expected HH:MM)"
-              exit 2
-            fi
-          done
+          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
+          test -f docs/outputs/scoin_plus_intraday.csv || (echo "Missing docs/outputs/scoin_plus_intraday.csv" && exit 2)
+          # 入力の簡易バリデーション（半角数字:コロン）
+          [[ "${{ inputs.session_start }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
+          [[ "${{ inputs.session_end }}"   =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
+          [[ "${{ inputs.day_anchor }}"    =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
 
       - name: Generate intraday post and snapshot
         env:
           INDEX_KEY: scoin_plus
-          CSV_FILE: docs/outputs/scoin_plus_intraday.csv
-          CSV_COL: S-COIN+
+          CSV: docs/outputs/scoin_plus_intraday.csv
           OUT_JSON: docs/outputs/scoin_plus_stats.json
-          OUT_TXT:  docs/outputs/scoin_plus_post_intraday.txt
-          SNAP_PNG: docs/outputs/scoin_plus_intraday.png
-          SES_START: ${{ inputs.session_start }}
-          SES_END:   ${{ inputs.session_end }}
-          DAY_ANCHOR: ${{ inputs.day_anchor }}
-          BASIS: ${{ inputs.basis }}
+          OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
+          SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
+          SESSION_START: ${{ inputs.session_start }}  # 例: "09:00"
+          SESSION_END:   ${{ inputs.session_end }}    # 例: "15:30"
+          DAY_ANCHOR:    ${{ inputs.day_anchor }}     # 例: "09:00"
+          BASIS:         ${{ inputs.basis }}          # 例: "open@09:00"
         run: |
           set -euo pipefail
-
-          SESSION="${SES_START}–${SES_END}"   # en dash（U+2013）で結合。スクリプト側がこの形式を想定
-          echo "SESSION=${SESSION}"
+          echo "=== intraday snapshot ==="
+          echo "INDEX_KEY=${INDEX_KEY}"
+          echo "SESSION_START=${SESSION_START}"
+          echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
 
-          # 主要生成（PNG / テキスト / JSON）
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
-            --csv "${CSV_FILE}" \
-            --csv-col "${CSV_COL}" \
+            --csv "${CSV}" \
             --out-json "${OUT_JSON}" \
-            --out-text "${OUT_TXT}" \
-            --snapshot-png "${SNAP_PNG}" \
-            --session "${SESSION}" \
+            --out-text "${OUT_TEXT}" \
+            --snapshot-png "${SNAPSHOT_PNG}" \
+            --session-start "${SESSION_START}" \
+            --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}"
 
-      - name: Commit outputs if changed
-        run: |
-          git config --global safe.directory "$GITHUB_WORKSPACE"
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add docs/outputs/scoin_plus_intraday.png \
-                  docs/outputs/scoin_plus_post_intraday.txt \
-                  docs/outputs/scoin_plus_stats.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update S-COIN+ (snapshot + post + stats)"
-            git push
-          else
-            echo "No changes to commit."
-          fi
-
       - name: Upload artifacts (for debug)
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scoin_plus-intraday-debug
+          name: scoin_plus_intraday_artifacts
           path: |
             docs/outputs/scoin_plus_intraday.png
             docs/outputs/scoin_plus_post_intraday.txt
             docs/outputs/scoin_plus_stats.json
-            docs/outputs/scoin_plus_intraday.csv
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Commit outputs if changed
+        run: |
+          set -e
+          git config --global user.name  "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add docs/outputs/scoin_plus_intraday.png \
+                  docs/outputs/scoin_plus_post_intraday.txt \
+                  docs/outputs/scoin_plus_stats.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(intraday): update scoin_plus (snapshot & post)"
+            git push
+          else
+            echo "No output changes."
+          fi
