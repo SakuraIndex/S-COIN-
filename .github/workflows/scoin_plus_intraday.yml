@@ -16,9 +16,9 @@ on:
         required: true
         default: "09:00"
       basis:
-        description: "Return basis label (e.g., open@09:00)"
+        description: "Return basis label: prev_close or open@HH:MM"
         required: true
-        default: "open@09:00"
+        default: "prev_close"
 
 permissions:
   contents: write
@@ -48,28 +48,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # 依存が薄い環境向けの最低限
+          python - <<'PY'
+          import sys, subprocess
+          pkgs = ["pandas>=2.0", "matplotlib>=3.7", "pytz"]
+          subprocess.check_call([sys.executable, "-m", "pip", "install", *pkgs])
+          PY
 
       - name: Verify scripts & inputs exist
         run: |
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
           test -f docs/outputs/scoin_plus_intraday.csv || (echo "Missing docs/outputs/scoin_plus_intraday.csv" && exit 2)
-          # simple HH:MM validation
           [[ "${{ inputs.session_start }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
           [[ "${{ inputs.session_end }}"   =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
           [[ "${{ inputs.day_anchor }}"    =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
 
       - name: Generate intraday post and snapshot
         env:
-          INDEX_KEY: "S-COIN+"  # CSVの列名に合わせる
+          INDEX_KEY: scoin_plus
           CSV: docs/outputs/scoin_plus_intraday.csv
           OUT_JSON: docs/outputs/scoin_plus_stats.json
           OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
           SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
-          SESSION_START: ${{ inputs.session_start }}
-          SESSION_END:   ${{ inputs.session_end }}
-          DAY_ANCHOR:    ${{ inputs.day_anchor }}
-          BASIS:         ${{ inputs.basis }}
-          VALUE_TYPE:    percent   # CSVの値が%（差分=last - anchor）
+          SESSION_START: ${{ inputs.session_start }}  # "09:00"
+          SESSION_END:   ${{ inputs.session_end }}    # "15:30"
+          DAY_ANCHOR:    ${{ inputs.day_anchor }}     # "09:00"
+          BASIS:         ${{ inputs.basis }}          # "prev_close" or "open@HH:MM"
         run: |
           set -euo pipefail
           echo "=== intraday snapshot ==="
@@ -78,7 +82,6 @@ jobs:
           echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
-          echo "VALUE_TYPE=${VALUE_TYPE}"
 
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -89,8 +92,7 @@ jobs:
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}" \
-            --value-type "${VALUE_TYPE}"
+            --basis "${BASIS}"
 
       - name: Upload artifacts (for debug)
         if: always()
