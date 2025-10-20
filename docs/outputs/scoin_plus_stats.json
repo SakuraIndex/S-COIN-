@@ -1,1 +1,12 @@
-{"index_key": "scoin_plus", "pct_1d": -13.74236525924874, "delta_level": -0.8850981584639275, "scale": "percent", "basis": "open@09:00", "updated_at": "2025-10-20T04:41:31.508184Z"}
+{
+  "index_key": "scoin_plus",
+  "label": "SCOIN_PLUS",
+  "pct_intraday": 147.77114919671791,
+  "basis": "open@09:00",
+  "session": {
+    "start": "09:00",
+    "end": "15:30",
+    "anchor": "09:00"
+  },
+  "updated_at": "2025-10-20T14:40:00+09:00"
+}
