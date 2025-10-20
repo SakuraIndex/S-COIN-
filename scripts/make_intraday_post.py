@@ -12,12 +12,11 @@ S-COIN+（ほか汎用）用：日中スナップショット作成 & テキス�
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import time
 from typing import Tuple, Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
-
 
 JST = "Asia/Tokyo"
 
@@ -46,7 +45,6 @@ def resolve_value_column(df: pd.DataFrame, index_key: str) -> str:
     if not candidates:
         raise ValueError("CSVに値列が見つかりません。")
 
-    # 典型例のマッピング（必要に応じ追加）
     mapping = {
         "scoin_plus": "S-COIN+",
         "s-coin+": "S-COIN+",
@@ -58,16 +56,13 @@ def resolve_value_column(df: pd.DataFrame, index_key: str) -> str:
         if want in df.columns:
             return want
 
-    # 正規化照合
     by_norm = {norm(c): c for c in candidates}
     if key_n in by_norm:
         return by_norm[key_n]
 
-    # 末手段：値列が1本ならそれを使う
     if len(candidates) == 1:
         return candidates[0]
 
-    # ダメなら候補を見せて失敗
     raise ValueError(f"CSVから '{index_key}' に対応する列を特定できません。候補: {set(candidates)}")
 
 
@@ -75,8 +70,6 @@ def to_jst(df: pd.DataFrame) -> pd.DataFrame:
     # Datetime を UTC とみなしてJSTへ（あなたのCSVは UTC 00:00 = JST 09:00 でした）
     ts = pd.to_datetime(df["Datetime"], utc=True, errors="coerce")
     if ts.isna().all():
-        # すべてNaT -> ロケール不明なのでそのまま扱うが、以降のbetween_timeが使えない
-        # ここではUTC扱いにしてJSTへ（安全側）
         ts = pd.to_datetime(df["Datetime"], errors="coerce").dt.tz_localize("UTC")
     ts = ts.tz_convert(JST)
     out = df.copy()
@@ -87,11 +80,9 @@ def to_jst(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_session(df_jst: pd.DataFrame, sess: Session) -> pd.DataFrame:
     start_t, end_t = sess.as_times()
-    # between_time は tz-aware でもOK（include_***指定は使わない）
     try:
         out = df_jst.between_time(start_time=start_t, end_time=end_t)
     except Exception:
-        # 念のための後方互換：マスクで代替
         idx = df_jst.index
         out = df_jst[(idx.time >= start_t) & (idx.time <= end_t)]
     if out.empty:
@@ -128,7 +119,6 @@ def compute_pct(df_jst: pd.DataFrame, col: str, basis: str, day_anchor: str) -> 
         hhmm = basis.split("@", 1)[1]
         av = anchor_value(df_jst, col, hhmm)
         if av is None:
-            # アンカーを day_anchor でフォールバック
             av = anchor_value(df_jst, col, day_anchor)
         if av is None:
             raise ValueError("アンカー時刻の値が取得できませんでした。")
@@ -190,7 +180,7 @@ def main():
     p.add_argument("--snapshot-png", required=True)
     p.add_argument("--session-start", required=True)  # "09:00"
     p.add_argument("--session-end", required=True)    # "15:30"
-    p.add_argument("--day-anchor", required=True)     # "09:00"（ラベル用/フォールバック）
+    p.add_argument("--day-anchor", required=True)     # "09:00"
     p.add_argument("--basis", required=True)          # "prev_close" or "open@HH:MM"
     args = p.parse_args()
 
@@ -206,14 +196,14 @@ def main():
     sess = Session(args.session_start, args.session_end)
     df_sess = filter_session(df_jst, sess)
 
-    # プロット用系列の作成
+    # 値の計算
     pct_value, basis_label = compute_pct(df_sess, value_col, args.basis, args.day_anchor)
+
+    # プロット用系列
     if basis_label == "prev_close":
-        # そのまま（%）
         plot_series = df_sess[value_col]
         title_label = "S-COIN+" if args.index_key.lower().startswith("scoin") else args.index_key
     else:
-        # open@HH:MM 基準 → 差分系列
         hhmm = basis_label.split("@", 1)[1]
         av = anchor_value(df_sess, value_col, hhmm)
         if av is None:
@@ -233,22 +223,22 @@ def main():
         title_label,
     )
 
-    # テキスト（X用）
+    # テキスト
     sign = "+" if pct_value >= 0 else ""
     now_jst = pd.Timestamp.now(tz=JST).strftime("%Y/%m/%d %H:%M")
     label_jp = ("prev_close" if basis_label == "prev_close" else basis_label)
     lines = [
         f"▲ {title_label} 日中スナップショット ({now_jst})",
         f"{sign}{pct_value:.2f}%（基準: {label_jp}）",
-        "#S_COIN+ #日本株" if title_label.upper().startswith("S-COIN") else "#日本株",
+        "#S-COIN+ #日本株" if title_label.upper().startswith("S-COIN") else "#日本株",
     ]
     with open(args.out_text, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    # JSON（ダッシュボード用）
+    # JSON（←ここが修正点。ワンライナーifを素直に書き換え）
     payload = {
         "index_key": args.index_key.upper() if args.index_key.lower().startswith("scoin") else args.index_key,
-        "label": title_label.upper() if title_jp := title_label else title_label,
+        "label": title_label.upper() if title_label else title_label,
         "pct_intraday": float(round(pct_value, 6)),
         "basis": basis_label,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
