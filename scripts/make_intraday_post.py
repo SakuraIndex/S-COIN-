@@ -37,10 +37,7 @@ def norm(s: str) -> str:
 
 
 def resolve_value_column(df: pd.DataFrame, index_key: str) -> str:
-    """
-    index_key から列名を推定。明示的に合わない場合は
-    'Datetime' 以外で値列が1本しか無ければそれを採用。
-    """
+    """index_key から列名を推定。"""
     candidates = [c for c in df.columns if c != "Datetime"]
     if not candidates:
         raise ValueError("CSVに値列が見つかりません。")
@@ -67,11 +64,14 @@ def resolve_value_column(df: pd.DataFrame, index_key: str) -> str:
 
 
 def to_jst(df: pd.DataFrame) -> pd.DataFrame:
-    # Datetime を UTC とみなしてJSTへ（あなたのCSVは UTC 00:00 = JST 09:00 でした）
-    ts = pd.to_datetime(df["Datetime"], utc=True, errors="coerce")
+    """Datetime列をUTCとして解釈→JSTへ変換し、DatetimeIndexにして返す。"""
+    ts = pd.to_datetime(df["Datetime"], errors="coerce", utc=True)
+    # 万一すべてNaTなら（タイムゾーン情報なし）UTCとしてローカライズしてからJSTへ
     if ts.isna().all():
         ts = pd.to_datetime(df["Datetime"], errors="coerce").dt.tz_localize("UTC")
-    ts = ts.tz_convert(JST)
+    # Series は .dt アクセサで tz_convert
+    ts = ts.dt.tz_convert(JST)
+
     out = df.copy()
     out["Datetime"] = ts
     out = out.set_index("Datetime").sort_index()
@@ -91,7 +91,7 @@ def filter_session(df_jst: pd.DataFrame, sess: Session) -> pd.DataFrame:
 
 
 def anchor_value(df_jst: pd.DataFrame, col: str, hhmm: str) -> Optional[float]:
-    """JSTで hh:mm に最も近い（同時刻 or 直後）値を返す。なければ None"""
+    """JSTで hh:mm 以降最初の値を返す（なければ None）"""
     hh, mm = map(int, hhmm.split(":"))
     target = df_jst.between_time(start_time=time(hh, mm), end_time=time(23, 59))
     if target.empty:
@@ -235,7 +235,7 @@ def main():
     with open(args.out_text, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
-    # JSON（←ここが修正点。ワンライナーifを素直に書き換え）
+    # JSON
     payload = {
         "index_key": args.index_key.upper() if args.index_key.lower().startswith("scoin") else args.index_key,
         "label": title_label.upper() if title_label else title_label,
