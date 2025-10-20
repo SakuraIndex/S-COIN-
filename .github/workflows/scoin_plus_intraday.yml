@@ -1,0 +1,79 @@
+name: S-COIN+ • intraday snapshot (JST 09:00–15:30)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 日本株セッション中に15分間隔で更新
+    - cron: "*/15 0-6 * * 1-5"
+    # ↑ UTCで 00:00〜06:59 → JSTで09:00〜15:59（平日）
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scoin-plus-intraday
+  cancel-in-progress: false
+
+env:
+  INDEX_KEY: scoin_plus
+  OUT_DIR: docs/outputs
+  TZ: Asia/Tokyo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Verify scripts exist
+        run: |
+          test -f scripts/make_intraday_post.py || (echo "Missing make_intraday_post.py" && exit 2)
+          test -f scripts/plot_intraday.py || (echo "Missing plot_intraday.py" && exit 2)
+
+      - name: Generate intraday post and snapshot
+        run: |
+          python scripts/make_intraday_post.py \
+            --index-key "${INDEX_KEY}" \
+            --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
+            --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
+            --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
+            --session "stock" \
+            --basis "open@09:00" \
+            --label "S-COIN+" \
+            --day-anchor "JST@09:00" \
+            --session-start "09:00" \
+            --session-end "15:30"
+
+          python scripts/plot_intraday.py \
+            --index-key "${INDEX_KEY}" \
+            --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
+            --out "${OUT_DIR}/${INDEX_KEY}_intraday.png" \
+            --title "S-COIN+ Intraday Snapshot (JST 09:00–15:30)" \
+            --color "#00e5e5"
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs/outputs
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(intraday): update scoin_plus snapshot + post"
+            git push
+          else
+            echo "No changes to commit."
+          fi
