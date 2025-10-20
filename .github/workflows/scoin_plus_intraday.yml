@@ -69,6 +69,7 @@ jobs:
           SESSION_END:   ${{ inputs.session_end }}    # 例: "15:30"
           DAY_ANCHOR:    ${{ inputs.day_anchor }}     # 例: "09:00"
           BASIS:         ${{ inputs.basis }}          # 例: "open@09:00"
+          VALUE_TYPE:    percent                      # ← 追加：CSVは％の系列として解釈
         run: |
           set -euo pipefail
           echo "=== intraday snapshot ==="
@@ -77,6 +78,7 @@ jobs:
           echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
+          echo "VALUE_TYPE=${VALUE_TYPE}"
 
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -87,7 +89,8 @@ jobs:
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}"
+            --basis "${BASIS}" \
+            --value-type "${VALUE_TYPE}"
 
       - name: Upload artifacts (for debug)
         if: always()
