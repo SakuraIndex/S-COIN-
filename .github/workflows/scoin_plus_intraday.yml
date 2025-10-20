@@ -6,23 +6,18 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: scoin_plus_intraday
-  cancel-in-progress: false
-
-env:
-  INDEX_KEY: scoin_plus
-  OUT_DIR: docs/outputs
-  # セッション指定（JST）
-  SESSION_START: "09:00"
-  SESSION_END: "15:30"
-  DAY_ANCHOR: "09:00"   # open@09:00 の基準
-
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
+    env:
+      OUT_DIR: docs/outputs
+      INDEX_KEY: scoin_plus
+      LABEL: "S-COIN+"
+      SESSION_START: "09:00"
+      SESSION_END:   "15:30"
+      DAY_ANCHOR:    "09:00"
+      BASIS:         "open@09:00"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,52 +32,290 @@ jobs:
 
       - name: Install dependencies
         run: |
-          set -euxo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # 最低限
+          pip install pandas pytz python-dateutil matplotlib tzdata
 
       - name: Verify scripts exist
         run: |
-          set -euxo pipefail
-          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
+          test -f scripts/make_intraday_post.py || (echo "Missing make_intraday_post.py" && exit 2)
 
       - name: Generate intraday post and snapshot
         run: |
           set -euxo pipefail
           python scripts/make_intraday_post.py \
-            --index-key "${INDEX_KEY}" \
-            --csv "${OUT_DIR}/${INDEX_KEY}_intraday.csv" \
-            --out-json "${OUT_DIR}/${INDEX_KEY}_stats.json" \
-            --out-text "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" \
-            --snapshot-png "${OUT_DIR}/${INDEX_KEY}_intraday.png" \
-            --session-start "${SESSION_START}" \
-            --session-end "${SESSION_END}" \
-            --day-anchor "${DAY_ANCHOR}" \
-            --basis "open@09:00"
-
-          echo "--- ${INDEX_KEY}_post_intraday.txt ---"
-          sed -n '1,120p' "${OUT_DIR}/${INDEX_KEY}_post_intraday.txt" || true
-
-      - name: Upload artifacts (debug)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scoin-plus-intraday
-          path: |
-            docs/outputs/${{ env.INDEX_KEY }}_intraday.csv
-            docs/outputs/${{ env.INDEX_KEY }}_intraday.png
-            docs/outputs/${{ env.INDEX_KEY }}_post_intraday.txt
-            docs/outputs/${{ env.INDEX_KEY }}_stats.json
+            --index-key "$INDEX_KEY" \
+            --csv "$OUT_DIR/${INDEX_KEY}_intraday.csv" \
+            --csv-col "S-COIN+" \
+            --out-json "$OUT_DIR/${INDEX_KEY}_stats.json" \
+            --out-text "$OUT_DIR/${INDEX_KEY}_post_intraday.txt" \
+            --snapshot-png "$OUT_DIR/${INDEX_KEY}_intraday.png" \
+            --label "$LABEL" \
+            --session-start "$SESSION_START" \
+            --session-end   "$SESSION_END" \
+            --day-anchor    "$DAY_ANCHOR" \
+            --basis "$BASIS"
 
       - name: Commit outputs if changed
         run: |
-          set -euxo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A docs/outputs
+          git config --global user.name  github-actions
+          git config --global user.email github-actions@github.com
+          git add "$OUT_DIR/${INDEX_KEY}_intraday.png" \
+                  "$OUT_DIR/${INDEX_KEY}_post_intraday.txt" \
+                  "$OUT_DIR/${INDEX_KEY}_stats.json"
           if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update S-COIN+ snapshot+post (JST 09:00–15:30)"
+            git commit -m "chore(intraday): update ${INDEX_KEY} snapshot + post"
             git push
           else
             echo "No changes to commit."
           fi
+```
+
+````
+
+---
+
+# scripts/make_intraday_post.py
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Intraday snapshot & short post generator.
+
+- Input CSV format (example):
+    Datetime,S-COIN+
+    2025-10-20 00:00:00,2.2843
+    ...
+  * 'Datetime' is interpreted as UTC unless tz is given; converted to JST.
+  * Data column name may contain symbols (e.g., "S-COIN+").
+
+- Usage (example):
+    python scripts/make_intraday_post.py \
+      --index-key scoin_plus \
+      --csv docs/outputs/scoin_plus_intraday.csv \
+      --csv-col "S-COIN+" \
+      --out-json docs/outputs/scoin_plus_stats.json \
+      --out-text docs/outputs/scoin_plus_post_intraday.txt \
+      --snapshot-png docs/outputs/scoin_plus_intraday.png \
+      --label "S-COIN+" \
+      --session-start 09:00 --session-end 15:30 --day-anchor 09:00 \
+      --basis open@09:00
+
+This script purposely keeps plotting dependencies minimal (matplotlib only).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import pandas as pd
+import pytz
+import matplotlib
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
+
+JST = pytz.timezone("Asia/Tokyo")
+UTC = pytz.UTC
+
+# ----------------------------- Utilities -----------------------------------
+
+def to_hhmm(s: str) -> Tuple[int, int]:
+    """Parse "HH:MM" string to (H, M)."""
+    try:
+        h, m = s.strip().split(":")
+        return int(h), int(m)
+    except Exception as e:
+        raise ValueError(f"Invalid time format '{s}' (expected HH:MM)") from e
+
+
+def ensure_series_jst(col: pd.Series) -> pd.Series:
+    """Parse 'Datetime' column to tz-aware JST timestamps.
+
+    - If naive, assume UTC then convert to JST.
+    - If tz-aware, convert to JST.
+    """
+    ts = pd.to_datetime(col, errors="coerce")
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize(UTC)
+    ts = ts.dt.tz_convert(JST)
+    return ts
+
+
+def in_session_mask(ts_jst: pd.Series, start_hm: Tuple[int, int], end_hm: Tuple[int, int]) -> pd.Series:
+    """Boolean mask for rows within [start, end] JST (inclusive start)."""
+    sh, sm = start_hm
+    eh, em = end_hm
+    t = ts_jst.dt.time
+    return (
+        (t >= pd.to_datetime(f"{sh:02d}:{sm:02d}").time()) &
+        (t <= pd.to_datetime(f"{eh:02d}:{em:02d}").time())
+    )
+
+
+@dataclass
+class Basis:
+    kind: str  # 'open' currently
+    at_hm: Optional[Tuple[int, int]] = None
+
+
+def parse_basis(s: str) -> Basis:
+    # e.g., "open@09:00" or just "open"
+    s = (s or "").strip().lower()
+    if s.startswith("open@"):  # open@HH:MM
+        hhmm = s.split("@", 1)[1]
+        return Basis("open", to_hhmm(hhmm))
+    if s == "open":
+        return Basis("open", None)
+    raise ValueError(f"Unsupported basis: {s}")
+
+
+# ------------------------------ IO -----------------------------------------
+
+def load_intraday(csv_path: str, index_key: str, csv_col: Optional[str]) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    if "Datetime" not in df.columns:
+        raise ValueError("CSV must contain 'Datetime' column")
+    col = csv_col if csv_col else index_key
+    if col not in df.columns:
+        raise ValueError(f"CSV must contain '{col}' column (available: {list(df.columns)})")
+    df = df[["Datetime", col]].copy()
+    df = df.rename(columns={col: index_key})  # internal unified name
+    df["ts_jst"] = ensure_series_jst(df["Datetime"])  # jst-aware
+    df = df.sort_values("ts_jst").reset_index(drop=True)
+    return df
+
+
+# --------------------------- Core calculations -----------------------------
+
+def pick_basis_value(df: pd.DataFrame, index_key: str, basis: Basis, start_hm: Tuple[int, int]) -> float:
+    """Pick baseline value for percent change.
+
+    If basis.kind == 'open' and basis.at_hm is specified, pick the first row at that HH:MM
+    (within the session day). If not found, fallback to the first row within session.
+    """
+    if basis.kind != "open":
+        raise ValueError("Only 'open' basis is supported")
+
+    # session-day: use the date of DAY_ANCHOR match later, but here we just search in df
+    if basis.at_hm is not None:
+        bh, bm = basis.at_hm
+        mask = (df["ts_jst"].dt.hour == bh) & (df["ts_jst"].dt.minute == bm)
+        if mask.any():
+            return float(df.loc[mask, index_key].iloc[0])
+
+    # fallback: first row in the session will be used by caller after filtering
+    return float(df[index_key].iloc[0])
+
+
+def make_change_percent(series: pd.Series, base: float) -> pd.Series:
+    # avoid divide by zero
+    if base == 0:
+        return pd.Series([0.0] * len(series), index=series.index, dtype=float)
+    return (series - base) / abs(base) * 100.0
+
+
+# ----------------------------- Plotting ------------------------------------
+
+def plot_snapshot(ts_jst: pd.Series, pct: pd.Series, label: str, out_png: str):
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=140)
+    ax.plot(ts_jst.dt.strftime("%H:%M"), pct, linewidth=2.0)
+    ax.set_title(f"{label} Intraday Snapshot ({ts_jst.iloc[-1].strftime('%Y/%m/%d %H:%M')})")
+    ax.set_ylabel("Change vs Prev Close (%)")
+    ax.set_xlabel("Time")
+    ax.grid(True, alpha=0.2)
+    # darker theme-ish
+    fig.tight_layout()
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ----------------------------- Post text -----------------------------------
+
+def compose_post(label: str, ts_last: pd.Timestamp, pct_last: float) -> str:
+    arrow = "▲" if pct_last >= 0 else "▼"
+    ts_s = ts_last.strftime("%Y/%m/%d %H:%M")
+    sign = "+" if pct_last >= 0 else ""
+    lines = [
+        f"{arrow} {label} 日中スナップショット ({ts_s})",
+        f"{sign}{pct_last:.2f}%（前日終値比）",
+        "※ 構成銘柄の等ウェイト",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+# ------------------------------- Main --------------------------------------
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--index-key", required=True)
+    p.add_argument("--csv", required=True)
+    p.add_argument("--csv-col", default=None, help="actual CSV column name if differs from --index-key")
+    p.add_argument("--out-json", required=True)
+    p.add_argument("--out-text", required=True)
+    p.add_argument("--snapshot-png", default=None)
+    p.add_argument("--label", default=None)
+    p.add_argument("--session-start", required=True, help="HH:MM JST")
+    p.add_argument("--session-end", required=True, help="HH:MM JST")
+    p.add_argument("--day-anchor", default="09:00", help="HH:MM JST")
+    p.add_argument("--basis", default="open@09:00")
+    args = p.parse_args()
+
+    index_key = args.index_key
+    label = args.label or index_key
+
+    # Load & normalize
+    df_all = load_intraday(args.csv, index_key, args.csv_col)
+
+    # Filter current session JST (intraday window)
+    start_hm = to_hhmm(args.session_start)
+    end_hm = to_hhmm(args.session_end)
+    mask = in_session_mask(df_all["ts_jst"], start_hm, end_hm)
+    df = df_all.loc[mask].copy()
+    if df.empty:
+        # Fallback: use last N points even if out of band
+        df = df_all.tail(60).copy()
+
+    # Determine basis
+    basis = parse_basis(args.basis)
+    # If basis specifies exact HH:MM we try on filtered df first; fallback logic inside
+    if not df.empty:
+        base_val = pick_basis_value(df, index_key, basis, start_hm)
+    else:
+        base_val = pick_basis_value(df_all, index_key, basis, start_hm)
+
+    pct_series = make_change_percent(df[index_key], base_val)
+
+    # Plot snapshot
+    if args.snapshot_png:
+        plot_snapshot(df["ts_jst"], pct_series, label, args.snapshot_png)
+
+    # Compose short post text
+    ts_last = df["ts_jst"].iloc[-1]
+    pct_last = float(pct_series.iloc[-1])
+    post_text = compose_post(label, ts_last, pct_last)
+    with open(args.out_text, "w", encoding="utf-8") as f:
+        f.write(post_text)
+
+    # JSON stats (for site header etc.)
+    stats = {
+        "index_key": index_key,
+        "pct_1d": pct_last,
+        "delta_level": float(df[index_key].iloc[-1] - base_val),
+        "scale": "percent",
+        "basis": args.basis,
+        "updated_at": pd.Timestamp.utcnow().isoformat() + "Z",
+    }
+    with open(args.out_json, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    main()
+````
+
+```
+```
