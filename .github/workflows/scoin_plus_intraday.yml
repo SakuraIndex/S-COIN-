@@ -53,7 +53,6 @@ jobs:
         run: |
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
           test -f docs/outputs/scoin_plus_intraday.csv || (echo "Missing docs/outputs/scoin_plus_intraday.csv" && exit 2)
-          # 入力の簡易バリデーション（半角数字:コロン）
           [[ "${{ inputs.session_start }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
           [[ "${{ inputs.session_end }}"   =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
           [[ "${{ inputs.day_anchor }}"    =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
@@ -65,11 +64,10 @@ jobs:
           OUT_JSON: docs/outputs/scoin_plus_stats.json
           OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
           SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
-          SESSION_START: ${{ inputs.session_start }}  # 例: "09:00"
-          SESSION_END:   ${{ inputs.session_end }}    # 例: "15:30"
-          DAY_ANCHOR:    ${{ inputs.day_anchor }}     # 例: "09:00"
-          BASIS:         ${{ inputs.basis }}          # 例: "open@09:00"
-          VALUE_TYPE:    percent                      # ← 追加：CSVは％の系列として解釈
+          SESSION_START: ${{ inputs.session_start }}
+          SESSION_END:   ${{ inputs.session_end }}
+          DAY_ANCHOR:    ${{ inputs.day_anchor }}
+          BASIS:         ${{ inputs.basis }}
         run: |
           set -euo pipefail
           echo "=== intraday snapshot ==="
@@ -78,7 +76,6 @@ jobs:
           echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
-          echo "VALUE_TYPE=${VALUE_TYPE}"
 
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -89,8 +86,7 @@ jobs:
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}" \
-            --value-type "${VALUE_TYPE}"
+            --basis "${BASIS}"
 
       - name: Upload artifacts (for debug)
         if: always()
