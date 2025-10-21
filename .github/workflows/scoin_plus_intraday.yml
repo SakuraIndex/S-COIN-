@@ -1,12 +1,38 @@
-name: Update S-COIN+ Intraday Snapshot
+name: S-COIN+ • intraday snapshot (JST 09:00–15:30)
 
 on:
+  workflow_dispatch:
+    inputs:
+      session_start:
+        description: "Session start (HH:MM JST)"
+        required: true
+        default: "09:00"
+      session_end:
+        description: "Session end (HH:MM JST)"
+        required: true
+        default: "15:30"
+      day_anchor:
+        description: "Day anchor time (HH:MM JST)"
+        required: true
+        default: "09:00"
+      basis:
+        description: "Return basis label"
+        required: true
+        default: "prev_close"
+      value_type:
+        description: "Value type: ratio | percent (override default)"
+        required: false
+        default: ""
   schedule:
-    # ▶ 前場終了後（11:35 JST = 02:35 UTC）
-    - cron: '35 2 * * 1-5'
-    # ▶ 後場終了後（15:35 JST = 06:35 UTC）
-    - cron: '35 6 * * 1-5'
-  workflow_dispatch:  # 手動実行も可
+    - cron: "35 2 * * 1-5"   # JST 11:35
+    - cron: "35 6 * * 1-5"   # JST 15:35
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scoin-plus-intraday-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -14,67 +40,113 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Verify scripts & inputs exist
+      - name: Verify scripts & inputs
         run: |
-          test -f scripts/make_intraday_post.py
-          test -f docs/outputs/scoin_plus_intraday.csv
+          set -e
+          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
+          test -f docs/outputs/scoin_plus_intraday.csv || (echo "Missing docs/outputs/scoin_plus_intraday.csv" && exit 1)
+          echo "All inputs verified."
 
-      - name: Generate intraday post and snapshot
+      - name: Generate intraday snapshot and post
+        env:
+          INDEX_KEY: S_COIN_PLUS
+          CSV: docs/outputs/scoin_plus_intraday.csv
+          OUT_JSON: docs/outputs/scoin_plus_stats.json
+          OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
+          SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
+          SESSION_START: ${{ inputs.session_start || '09:00' }}
+          SESSION_END: ${{ inputs.session_end || '15:30' }}
+          DAY_ANCHOR: ${{ inputs.day_anchor || '09:00' }}
+          BASIS: ${{ inputs.basis || 'prev_close' }}
+          VALUE_TYPE: ${{ inputs.value_type || 'percent' }}
+          DT_COL: "Unnamed: 0"
+          LABEL: S-COIN+
         run: |
-          set -euxo pipefail
-          echo "=== intraday snapshot ==="
-
-          INDEX_KEY="scoin_plus"
-          CSV_PATH="docs/outputs/scoin_plus_intraday.csv"
-          OUT_JSON="docs/outputs/scoin_plus_stats.json"
-          OUT_TEXT="docs/outputs/scoin_plus_post_intraday.txt"
-          OUT_PNG="docs/outputs/scoin_plus_intraday.png"
-
-          SESSION_START="09:00"
-          SESSION_END="15:30"
-          DAY_ANCHOR="09:00"
-          BASIS="prev_close"
-          VALUE_TYPE="percent"
-
+          set -euo pipefail
+          echo "=== Generate S-COIN+ intraday snapshot ==="
           python scripts/make_intraday_post.py \
-            --index-key "$INDEX_KEY" \
-            --csv "$CSV_PATH" \
-            --out-json "$OUT_JSON" \
-            --out-text "$OUT_TEXT" \
-            --snapshot-png "$OUT_PNG" \
-            --session-start "$SESSION_START" \
-            --session-end "$SESSION_END" \
-            --day-anchor "$DAY_ANCHOR" \
-            --basis "$BASIS"
+            --index-key "${INDEX_KEY}" \
+            --csv "${CSV}" \
+            --out-json "${OUT_JSON}" \
+            --out-text "${OUT_TEXT}" \
+            --snapshot-png "${SNAPSHOT_PNG}" \
+            --session-start "${SESSION_START}" \
+            --session-end "${SESSION_END}" \
+            --day-anchor "${DAY_ANCHOR}" \
+            --basis "${BASIS}" \
+            --value-type "${VALUE_TYPE}" \
+            --dt-col "${DT_COL}" \
+            --label "${LABEL}"
 
       - name: Upload artifacts (for debug)
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scoin_plus_debug
-          path: docs/outputs/
+          name: scoin_plus_intraday_artifacts
+          path: |
+            docs/outputs/scoin_plus_intraday.png
+            docs/outputs/scoin_plus_post_intraday.txt
+            docs/outputs/scoin_plus_stats.json
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Commit outputs if changed
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/scoin_plus_*
+          set -e
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/outputs/scoin_plus_intraday.png \
+                  docs/outputs/scoin_plus_post_intraday.txt \
+                  docs/outputs/scoin_plus_stats.json || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update scoin_plus (snapshot & post)"
+            git commit -m "chore(intraday): update S-COIN+ (snapshot & post)"
             git push
           else
-            echo "No changes to commit."
+            echo "No output changes detected."
+          fi
+
+      - name: Checkout SakuraIndexSite (for publishing)
+        uses: actions/checkout@v4
+        with:
+          repository: Sakuralndex/SakuraIndexSite
+          path: SakuraIndexSite
+          token: ${{ secrets.SITE_PAT }}
+          fetch-depth: 0
+
+      - name: Publish S-COIN+ snapshot to site
+        run: |
+          set -euo pipefail
+          python SakuraIndexSite/scripts/publish_to_site.py \
+            --index-key S_COIN_PLUS \
+            --from docs/outputs \
+            --site-root SakuraIndexSite \
+            --verbose
+
+      - name: Commit & push site charts
+        run: |
+          set -euo pipefail
+          git -C SakuraIndexSite config user.name  "github-actions[bot]"
+          git -C SakuraIndexSite config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C SakuraIndexSite add docs/charts || true
+          if git -C SakuraIndexSite diff --cached --quiet; then
+            echo "No site changes."
+          else
+            git -C SakuraIndexSite commit -m "publish: S-COIN+ intraday snapshot"
+            git -C SakuraIndexSite push origin main
           fi
