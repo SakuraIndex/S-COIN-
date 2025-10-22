@@ -1,0 +1,177 @@
+name: S-COIN+ • intraday + publish (JST 09:00–15:30)
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_start:
+        description: "Session start (HH:MM JST)"
+        required: true
+        default: "09:00"
+      session_end:
+        description: "Session end (HH:MM JST)"
+        required: true
+        default: "15:30"
+      day_anchor:
+        description: "Day anchor time (HH:MM JST)"
+        required: true
+        default: "09:00"
+      basis:
+        description: "Return basis label"
+        required: true
+        default: "prev_close"
+      value_type:
+        description: "Value type: ratio | percent (blank = script default)"
+        required: false
+        default: ""
+
+  schedule:
+    - cron: "35 2 * * 1-5"   # JST 11:35
+    - cron: "35 6 * * 1-5"   # JST 15:35
+
+permissions:
+  contents: write
+
+env:
+  INDEX_KEY: S-COIN+
+  LABEL: S-COIN+
+  CSV: docs/outputs/scoinp_intraday.csv
+  DT_COL: "Datetime"
+  OUT_JSON: docs/outputs/scoinp_stats.json
+  OUT_TEXT: docs/outputs/scoinp_post_intraday.txt
+  SNAPSHOT_PNG: docs/outputs/scoinp_intraday.png
+
+  SITE_REPO: SakuraIndex/Sakura-Index-Site
+  SITE_BRANCH: main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    concurrency:
+      group: intraday-${{ github.ref }}-SCOINP
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout (this repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Verify inputs & files
+        run: |
+          set -e
+          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
+          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
+          echo "OK: ${CSV}"
+
+      - name: Generate intraday snapshot and post (with fallback)
+        env:
+          SESSION_START: ${{ inputs.session_start || '09:00' }}
+          SESSION_END:   ${{ inputs.session_end   || '15:30' }}
+          DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
+          BASIS:         ${{ inputs.basis         || 'prev_close' }}
+          VALUE_TYPE:    ${{ inputs.value_type    || '' }}
+        run: |
+          set -euo pipefail
+          echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
+
+          if python scripts/make_intraday_post.py -h | grep -q -- '--session-start'; then
+            echo "[info] extended CLI detected -> using full arguments"
+            VT_ARGS=""
+            if [ -n "${VALUE_TYPE}" ]; then VT_ARGS="--value-type ${VALUE_TYPE}"; fi
+
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAPSHOT_PNG}" \
+              --session-start "${SESSION_START}" \
+              --session-end "${SESSION_END}" \
+              --day-anchor "${DAY_ANCHOR}" \
+              --basis "${BASIS}" \
+              --dt-col "${DT_COL}" \
+              --label "${LABEL}" \
+              ${VT_ARGS}
+          else
+            echo "[warn] legacy CLI detected -> falling back to minimal arguments"
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}"
+          fi
+
+      - name: Upload artifacts (for debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scoinp_intraday_artifacts
+          path: |
+            ${{ env.OUT_JSON }}
+            ${{ env.OUT_TEXT }}
+            ${{ env.SNAPSHOT_PNG }}
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: Checkout site repo (for publishing)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SITE_REPO }}
+          ref: ${{ env.SITE_BRANCH }}
+          token: ${{ secrets.SITE_PAT }}
+          path: site
+
+      - name: Copy snapshot files into site tree (with PNG auto-detect)
+        run: |
+          set -e
+          PUBLISH_DIR="docs/charts/${INDEX_KEY}"
+          mkdir -p "site/${PUBLISH_DIR}"
+
+          PNG_PATH="${SNAPSHOT_PNG}"
+          if [ ! -f "${PNG_PATH}" ]; then
+            CANDIDATE=$(ls docs/outputs/*intraday*.png 2>/dev/null | head -n1 || true)
+            if [ -n "${CANDIDATE}" ]; then
+              echo "[warn] ${PNG_PATH} not found. Using detected: ${CANDIDATE}"
+              PNG_PATH="${CANDIDATE}"
+            else
+              echo "[warn] intraday PNG not found. Skipping PNG publish."
+              PNG_PATH=""
+            fi
+          fi
+
+          if [ -n "${PNG_PATH}" ] && [ -f "${PNG_PATH}" ]; then
+            cp -f "${PNG_PATH}" "site/${PUBLISH_DIR}/intraday.png"
+          fi
+          if [ -f "${OUT_TEXT}" ]; then
+            cp -f "${OUT_TEXT}" "site/${PUBLISH_DIR}/post_intraday.txt"
+          fi
+          if [ -f "${OUT_JSON}" ]; then
+            cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
+          fi
+          ls -al "site/${PUBLISH_DIR}" || true
+
+      - name: Commit & push site charts
+        working-directory: site
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/charts/${INDEX_KEY}/intraday.png docs/charts/${INDEX_KEY}/post_intraday.txt docs/charts/${INDEX_KEY}/stats.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(charts): update ${INDEX_KEY} intraday"
+            git push origin "${{ env.SITE_BRANCH }}"
+          else
+            echo "No site changes."
+          fi
