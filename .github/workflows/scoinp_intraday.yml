@@ -34,6 +34,7 @@ permissions:
 env:
   INDEX_KEY: S-COIN+
   LABEL: S-COIN+
+  # 想定の既定パス（無ければ後続の自動検出で補正）
   CSV: docs/outputs/scoinp_intraday.csv
   DT_COL: "Datetime"
   OUT_JSON: docs/outputs/scoinp_stats.json
@@ -68,12 +69,42 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Verify inputs & files
+      # --- CSV を自動検出して CSV_PATH に確定させる ---
+      - name: Resolve CSV path (auto-detect if missing)
+        id: findcsv
         run: |
-          set -e
-          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
-          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
-          echo "OK: ${CSV}"
+          set -euo pipefail
+          CSV_CANDIDATE=""
+          if [ -f "${CSV}" ]; then
+            CSV_CANDIDATE="${CSV}"
+            echo "[info] Found CSV at ${CSV_CANDIDATE}"
+          else
+            echo "[warn] ${CSV} not found. Trying auto-detect..."
+            # 代表的な候補パターンを順に探索
+            for pat in \
+              "docs/outputs/*scoin*intraday*.csv" \
+              "docs/outputs/*coin*intraday*.csv" \
+              "docs/outputs/*s-coin*intraday*.csv" \
+              "docs/outputs/*scoin*_*intraday*.csv" \
+              "docs/outputs/*intraday*.csv"
+            do
+              found=$(ls ${pat} 2>/dev/null | head -n1 || true)
+              if [ -n "${found}" ] && [ -f "${found}" ]; then
+                CSV_CANDIDATE="${found}"
+                echo "[info] Auto-detected CSV: ${CSV_CANDIDATE}"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "${CSV_CANDIDATE}" ]; then
+            echo "::error::CSV not found. Tried ${CSV} and common patterns under docs/outputs/"
+            echo "Existing files:"; ls -al docs/outputs || true
+            exit 1
+          fi
+
+          # 後続ステップで使う
+          echo "CSV_PATH=${CSV_CANDIDATE}" >> "$GITHUB_ENV"
 
       - name: Generate intraday snapshot and post (with fallback)
         env:
@@ -85,6 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
+          echo "CSV_PATH=${CSV_PATH}"
 
           if python scripts/make_intraday_post.py -h | grep -q -- '--session-start'; then
             echo "[info] extended CLI detected -> using full arguments"
@@ -93,7 +125,7 @@ jobs:
 
             python scripts/make_intraday_post.py \
               --index-key "${INDEX_KEY}" \
-              --csv "${CSV}" \
+              --csv "${CSV_PATH}" \
               --out-json "${OUT_JSON}" \
               --out-text "${OUT_TEXT}" \
               --snapshot-png "${SNAPSHOT_PNG}" \
@@ -108,7 +140,7 @@ jobs:
             echo "[warn] legacy CLI detected -> falling back to minimal arguments"
             python scripts/make_intraday_post.py \
               --index-key "${INDEX_KEY}" \
-              --csv "${CSV}" \
+              --csv "${CSV_PATH}" \
               --out-json "${OUT_JSON}" \
               --out-text "${OUT_TEXT}"
           fi
