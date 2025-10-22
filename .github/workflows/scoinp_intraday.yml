@@ -24,10 +24,9 @@ on:
         required: true
         default: "percent"
 
-  # 任意: AM/PM 自動判定に使うスケジュール（UTC）
   schedule:
-    - cron: "35 2 * * 1-5"   # JST 11:35 = AM スナップ想定
-    - cron: "35 6 * * 1-5"   # JST 15:35 = PM
+    - cron: "35 2 * * 1-5"   # JST 11:35 (AM)
+    - cron: "35 6 * * 1-5"   # JST 15:35 (PM)
 
 permissions:
   contents: write
@@ -39,12 +38,17 @@ concurrency:
 env:
   INDEX_KEY: S_COIN_PLUS
   LABEL: "S-COIN+"
+
+  # 入出力
   CSV: docs/outputs/scoin_plus_intraday.csv
   DT_COL: "Datetime"
+  OUT_DIR: charts/S-COIN+
   OUT_JSON: charts/S-COIN+/stats.json
   OUT_TEXT: charts/S-COIN+/post_intraday.txt
   SNAPSHOT_PNG: charts/S-COIN+/intraday.png
   SNAPSHOT_AM_PNG: charts/S-COIN+/intraday_am.png
+
+  # サイト
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
 
@@ -69,7 +73,7 @@ jobs:
           python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Verify inputs & files
+      - name: Verify inputs & script
         shell: bash
         run: |
           set -e
@@ -88,6 +92,12 @@ jobs:
           fi
           echo "VALUE_TYPE=${{ inputs.value_type || 'percent' }}" >> "$GITHUB_ENV"
 
+      - name: Prepare output directories
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "${OUT_DIR}"
+
       - name: Generate intraday snapshot and post (with fallback)
         env:
           SESSION_START: ${{ inputs.session_start || '09:00' }}
@@ -100,12 +110,15 @@ jobs:
           set -euo pipefail
           echo "=== Generate ${LABEL} intraday snapshot ==="
 
-          # AM/PM で画像名を切替
+          # AM/PM で出力PNG名を決定
           if [[ "${PUBLISH_VARIANT}" == "am" ]]; then
             SNAP="${SNAPSHOT_AM_PNG}"
           else
             SNAP="${SNAPSHOT_PNG}"
           fi
+
+          # 念のためもう一度確実に作成（直接パス指定時の保険）
+          mkdir -p "$(dirname "${SNAP}")"
 
           echo "[try] extended CLI..."
           if python scripts/make_intraday_post.py \
@@ -174,7 +187,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add charts/S-COIN+ || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore(site): update S-COIN+ intraday charts (AM/PM with fallback)"
+            git commit -m "chore(site): update S-COIN+ intraday charts (AM/PM, mkdir fix)"
             git push
           else
             echo "No site changes."
