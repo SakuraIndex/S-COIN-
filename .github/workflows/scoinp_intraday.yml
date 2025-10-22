@@ -3,74 +3,97 @@ name: S-COIN+ • intraday + publish (JST 09:00–15:30)
 on:
   workflow_dispatch:
     inputs:
-      session_start: { description: "Session start (HH:MM JST)", required: true, default: "09:00" }
-      session_end:   { description: "Session end (HH:MM JST)",   required: true, default: "15:30" }
-      day_anchor:    { description: "Day anchor time (HH:MM JST)", required: true, default: "09:00" }
-      basis:         { description: "Return basis label", required: true, default: "prev_close" }
-      value_type:    { description: "Value type: ratio | percent", required: true, default: "percent" }
+      session_start:
+        description: "Session start (HH:MM JST)"
+        required: true
+        default: "09:00"
+      session_end:
+        description: "Session end (HH:MM JST)"
+        required: true
+        default: "15:30"
+      day_anchor:
+        description: "Day anchor time (HH:MM JST)"
+        required: true
+        default: "09:00"
+      basis:
+        description: "Return basis label"
+        required: true
+        default: "prev_close"
+      value_type:
+        description: "Value type: ratio | percent"
+        required: true
+        default: "percent"
+
+  # 例: 前場相当のスナップや定時投稿をしたい場合のスケジュール（UTC）
+  # - 02:35 UTC = 11:35 JST（日本株用のAMスナップ判定にも流用）
   schedule:
-    - cron: "35 2 * * 1-5"
-    - cron: "35 6 * * 1-5"
+    - cron: "35 2 * * 1-5"     # JST 11:35
+    - cron: "35 6 * * 1-5"     # JST 15:35
 
 permissions:
   contents: write
 
+concurrency:
+  group: scoinp-intraday-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  INDEX_KEY: S-COIN+
+  # ここは固定パラメータ（スクリプトの引数や公開先）
+  INDEX_KEY: S_COIN_PLUS
   LABEL: S-COIN+
   CSV: docs/outputs/scoin_plus_intraday.csv
-  OUT_JSON: docs/outputs/scoin_plus_stats.json
-  OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
-  SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
   DT_COL: "Datetime"
+  OUT_JSON: charts/S-COIN+/stats.json
+  OUT_TEXT: charts/S-COIN+/post_intraday.txt
+  SNAPSHOT_PNG: charts/S-COIN+/intraday.png
+  SNAPSHOT_AM_PNG: charts/S-COIN+/intraday_am.png   # AM判定になった時だけ使う
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
-  PUBLISH_DIR: charts/${{ env.INDEX_KEY }}
-
-concurrency:
-  group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
-  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Resolve CSV path (auto-detect if missing)
-        id: csv_detect
+      - name: Verify inputs & files
+        shell: bash
         run: |
           set -e
           if [ ! -f "${CSV}" ]; then
-            echo "[warn] ${CSV} not found, trying fallback name..."
-            if [ -f "docs/outputs/scoinp_intraday.csv" ]; then
-              echo "CSV=docs/outputs/scoinp_intraday.csv" >> "$GITHUB_ENV"
-            else
-              echo "CSV is missing"; exit 1
-            fi
+            echo "Missing CSV: ${CSV}"; exit 1
           fi
+          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
 
-      - name: Verify script exists
-        run: test -f scripts/make_intraday_post.py
-
+      # ← ここがエラーの原因だった箇所。env を step に正しくぶら下げ、式はクォートします
       - name: Decide publish variant (AM / PM)
         shell: bash
-        env: { RUN_SCHEDULE: ${{ github.event.schedule }} }
+        env:
+          RUN_SCHEDULE: "${{ github.event.schedule || '' }}"
         run: |
+          # スケジュール実行で 11:35 JST (= 02:35 UTC) の時だけ AM とみなす（任意）
           if [[ "${RUN_SCHEDULE}" == "35 2 * * 1-5" ]]; then
             echo "PUBLISH_VARIANT=am" >> "$GITHUB_ENV"
           else
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
+          # value_type は指定がなければ percent
           echo "VALUE_TYPE=${{ inputs.value_type || 'percent' }}" >> "$GITHUB_ENV"
 
       - name: Generate intraday snapshot and post
@@ -80,14 +103,22 @@ jobs:
           DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
           BASIS:         ${{ inputs.basis         || 'prev_close' }}
           VALUE_TYPE:    ${{ env.VALUE_TYPE }}
+        shell: bash
         run: |
           set -euo pipefail
+          echo "=== Generate ${LABEL} intraday snapshot ==="
+          # AM/PM で書き出し先（画像名）を切り替え
+          if [[ "${PUBLISH_VARIANT}" == "am" ]]; then
+            SNAP="${SNAPSHOT_AM_PNG}"
+          else
+            SNAP="${SNAPSHOT_PNG}"
+          fi
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
             --out-json "${OUT_JSON}" \
             --out-text "${OUT_TEXT}" \
-            --snapshot-png "${SNAPSHOT_PNG}" \
+            --snapshot-png "${SNAP}" \
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
@@ -96,54 +127,48 @@ jobs:
             --dt-col "${DT_COL}" \
             --label "${LABEL}"
 
-      - name: Upload artifacts (debug)
+      - name: Upload artifacts (for debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scoinp_intraday_artifacts
           path: |
-            ${OUT_TEXT}
-            ${OUT_JSON}
-            ${SNAPSHOT_PNG}
+            charts/S-COIN+/intraday.png
+            charts/S-COIN+/intraday_am.png
+            charts/S-COIN+/stats.json
+            charts/S-COIN+/post_intraday.txt
           if-no-files-found: ignore
           retention-days: 3
 
+      # サイトへ反映
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SITE_REPO }}
-          token: ${{ secrets.SITE_PAT }}
           ref: ${{ env.SITE_BRANCH }}
+          token: ${{ secrets.SITE_PAT }}
           path: site
 
-      - name: Copy snapshot files into site tree (with AM/PM & long-term)
+      - name: Copy snapshot files into site tree (with PNG auto-detect)
+        shell: bash
         run: |
           set -e
-          mkdir -p "site/${PUBLISH_DIR}"
-
-          if [ "${PUBLISH_VARIANT}" = "am" ]; then
-            cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday_am.png"
-          else
-            cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
-          fi
-
-          for T in 7d 1m 1y; do
-            F="docs/outputs/scoin_plus_${T}.png"
-            if [ -f "${F}" ]; then
-              cp -f "${F}" "site/${PUBLISH_DIR}/${T}.png"
-            fi
-          done
+          mkdir -p "site/charts/S-COIN+"
+          cp -f charts/S-COIN+/*.png "site/charts/S-COIN+/" 2>/dev/null || true
+          cp -f charts/S-COIN+/*.json "site/charts/S-COIN+/" 2>/dev/null || true
+          cp -f charts/S-COIN+/*.txt  "site/charts/S-COIN+/" 2>/dev/null || true
 
       - name: Commit & push site charts
-        working-directory: site
+        shell: bash
         run: |
           set -e
+          cd site
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${PUBLISH_DIR}" || true
+          git add charts/S-COIN+ || true
           if ! git diff --cached --quiet; then
-            git commit -m "publish(${ {env.INDEX_KEY} }): intraday ${PUBLISH_VARIANT}"
-            git push origin "${SITE_BRANCH}"
+            git commit -m "chore(site): update S-COIN+ intraday charts"
+            git push
           else
             echo "No site changes."
           fi
