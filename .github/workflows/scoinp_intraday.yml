@@ -24,11 +24,10 @@ on:
         required: true
         default: "percent"
 
-  # 例: 前場相当のスナップや定時投稿をしたい場合のスケジュール（UTC）
-  # - 02:35 UTC = 11:35 JST（日本株用のAMスナップ判定にも流用）
+  # 任意: AM/PM 自動判定に使うスケジュール（UTC）
   schedule:
-    - cron: "35 2 * * 1-5"     # JST 11:35
-    - cron: "35 6 * * 1-5"     # JST 15:35
+    - cron: "35 2 * * 1-5"   # JST 11:35 = AM スナップ想定
+    - cron: "35 6 * * 1-5"   # JST 15:35 = PM
 
 permissions:
   contents: write
@@ -38,15 +37,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ここは固定パラメータ（スクリプトの引数や公開先）
   INDEX_KEY: S_COIN_PLUS
-  LABEL: S-COIN+
+  LABEL: "S-COIN+"
   CSV: docs/outputs/scoin_plus_intraday.csv
   DT_COL: "Datetime"
   OUT_JSON: charts/S-COIN+/stats.json
   OUT_TEXT: charts/S-COIN+/post_intraday.txt
   SNAPSHOT_PNG: charts/S-COIN+/intraday.png
-  SNAPSHOT_AM_PNG: charts/S-COIN+/intraday_am.png   # AM判定になった時だけ使う
+  SNAPSHOT_AM_PNG: charts/S-COIN+/intraday_am.png
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
 
@@ -60,7 +58,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -69,34 +66,29 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Verify inputs & files
         shell: bash
         run: |
           set -e
-          if [ ! -f "${CSV}" ]; then
-            echo "Missing CSV: ${CSV}"; exit 1
-          fi
-          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
+          test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
+          test -f scripts/make_intraday_post.py || { echo "Missing scripts/make_intraday_post.py"; exit 1; }
 
-      # ← ここがエラーの原因だった箇所。env を step に正しくぶら下げ、式はクォートします
       - name: Decide publish variant (AM / PM)
         shell: bash
         env:
           RUN_SCHEDULE: "${{ github.event.schedule || '' }}"
         run: |
-          # スケジュール実行で 11:35 JST (= 02:35 UTC) の時だけ AM とみなす（任意）
           if [[ "${RUN_SCHEDULE}" == "35 2 * * 1-5" ]]; then
             echo "PUBLISH_VARIANT=am" >> "$GITHUB_ENV"
           else
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
-          # value_type は指定がなければ percent
           echo "VALUE_TYPE=${{ inputs.value_type || 'percent' }}" >> "$GITHUB_ENV"
 
-      - name: Generate intraday snapshot and post
+      - name: Generate intraday snapshot and post (with fallback)
         env:
           SESSION_START: ${{ inputs.session_start || '09:00' }}
           SESSION_END:   ${{ inputs.session_end   || '15:30' }}
@@ -107,25 +99,42 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Generate ${LABEL} intraday snapshot ==="
-          # AM/PM で書き出し先（画像名）を切り替え
+
+          # AM/PM で画像名を切替
           if [[ "${PUBLISH_VARIANT}" == "am" ]]; then
             SNAP="${SNAPSHOT_AM_PNG}"
           else
             SNAP="${SNAPSHOT_PNG}"
           fi
-          python scripts/make_intraday_post.py \
-            --index-key "${INDEX_KEY}" \
-            --csv "${CSV}" \
-            --out-json "${OUT_JSON}" \
-            --out-text "${OUT_TEXT}" \
-            --snapshot-png "${SNAP}" \
-            --session-start "${SESSION_START}" \
-            --session-end "${SESSION_END}" \
-            --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}" \
-            --value-type "${VALUE_TYPE}" \
-            --dt-col "${DT_COL}" \
-            --label "${LABEL}"
+
+          echo "[try] extended CLI..."
+          if python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAP}" \
+              --session-start "${SESSION_START}" \
+              --session-end "${SESSION_END}" \
+              --day-anchor "${DAY_ANCHOR}" \
+              --basis "${BASIS}" \
+              --dt-col "${DT_COL}" \
+              --label "${LABEL}" \
+              --value-type "${VALUE_TYPE}"; then
+            echo "[ok] extended CLI done."
+          else
+            echo "[fallback] legacy CLI (old script without --value-type/--dt-col/--label)"
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAP}" \
+              --session-start "${SESSION_START}" \
+              --session-end "${SESSION_END}" \
+              --day-anchor "${DAY_ANCHOR}" \
+              --basis "${BASIS}"
+          fi
 
       - name: Upload artifacts (for debug)
         if: always()
@@ -133,14 +142,12 @@ jobs:
         with:
           name: scoinp_intraday_artifacts
           path: |
-            charts/S-COIN+/intraday.png
-            charts/S-COIN+/intraday_am.png
-            charts/S-COIN+/stats.json
-            charts/S-COIN+/post_intraday.txt
+            charts/S-COIN+/*.png
+            charts/S-COIN+/*.json
+            charts/S-COIN+/*.txt
           if-no-files-found: ignore
           retention-days: 3
 
-      # サイトへ反映
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
@@ -149,7 +156,7 @@ jobs:
           token: ${{ secrets.SITE_PAT }}
           path: site
 
-      - name: Copy snapshot files into site tree (with PNG auto-detect)
+      - name: Copy snapshot files into site tree
         shell: bash
         run: |
           set -e
@@ -167,7 +174,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add charts/S-COIN+ || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore(site): update S-COIN+ intraday charts"
+            git commit -m "chore(site): update S-COIN+ intraday charts (AM/PM with fallback)"
             git push
           else
             echo "No site changes."
