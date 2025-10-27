@@ -9,7 +9,7 @@ on:
       basis:         { description: "Return basis label", required: true, default: "prev_close" }
       value_type:    { description: "auto | ratio | percent", required: false, default: "auto" }
 
-  # 平日 AM/PM で2回回す例（不要なら削除）
+  # 平日 AM/PM の定期実行（不要なら削除OK）
   schedule:
     - cron: "35 2 * * 1-5"   # JST 11:35
     - cron: "35 6 * * 1-5"   # JST 15:35
@@ -29,13 +29,13 @@ env:
   BASIS_DEFAULT: prev_close
   VALUE_TYPE_DEFAULT: auto
 
-  # サイト
+  # 公開サイト
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/S-COIN+
   PUBLISH_TOKEN: ${{ secrets.SITE_PAT || secrets.SITE_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
-  # このリポ内の一時出力（AM/PM どちらでも最終は intraday.png に集約してサイトへ）
+  # このリポでの一時出力
   OUT_DIR: docs/outputs
   OUT_JSON: docs/outputs/scoinp_stats.json
   OUT_TEXT: docs/outputs/scoinp_post_intraday.txt
@@ -46,6 +46,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 12
+
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -76,7 +77,7 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate intraday snapshot (JST)
+      - name: Generate intraday snapshot (JST) with legacy fallback
         env:
           SESSION_START: ${{ inputs.session_start || '09:00' }}
           SESSION_END:   ${{ inputs.session_end   || '15:30' }}
@@ -85,13 +86,20 @@ jobs:
           VALUE_TYPE_IN: ${{ inputs.value_type    || env.VALUE_TYPE_DEFAULT }}
         run: |
           set -euo pipefail
+
+          # 出力PNG名（AM/PM）
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then
             SNAP="${SNAPSHOT_AM_PNG}"
           else
             SNAP="${SNAPSHOT_PNG}"
           fi
           mkdir -p "$(dirname "${SNAP}")"
+
           echo "=== Generate ${LABEL} intraday (${PUBLISH_VARIANT:-pm}) ==="
+          echo "[try] extended CLI (with --label/--dt-col/--value-type)"
+
+          # set -e を一時解除して成否を自分で判定し、ダメなら旧CLIへ
+          set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -105,6 +113,23 @@ jobs:
             --label         "${LABEL}" \
             --dt-col        "${DT_COL}" \
             --value-type    "${VALUE_TYPE_IN}"
+          rc=$?
+          set -e
+
+          if [ $rc -ne 0 ]; then
+            echo "[fallback] legacy CLI (without --label/--dt-col/--value-type)"
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAP}" \
+              --session-start "${SESSION_START}" \
+              --session-end   "${SESSION_END}" \
+              --day-anchor    "${DAY_ANCHOR}" \
+              --basis         "${BASIS}"
+          fi
+
           ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}"
 
       - name: Checkout site repo
@@ -123,9 +148,9 @@ jobs:
           mkdir -p "${dst}"
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
-          # AM/PM どちらが生成されても intraday.png 名で上書き公開
-          if   [ -f "${SNAPSHOT_PNG}"     ]; then cp -f "${SNAPSHOT_PNG}"     "${dst}/intraday.png"
-          elif [ -f "${SNAPSHOT_AM_PNG}"  ]; then cp -f "${SNAPSHOT_AM_PNG}"  "${dst}/intraday.png"
+          # どちらが生成されてもサイト側は intraday.png に統一
+          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
+          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
           fi
           ls -l "${dst}"
 
