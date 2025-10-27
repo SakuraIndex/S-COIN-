@@ -71,4 +71,12 @@ jobs:
             [[ "$b" == "${INDEX_KEY}_"* ]] || { echo "❌ prefix mismatch: $b"; err=1; }
           done
           [ $err -eq 0 ] || exit 1
-          echo "
+          echo "✅ Prefix check passed."
+
+      - name: Commit charts if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/outputs/${{ env.INDEX_KEY }}_{1d,7d,1m,1y}.png 2>/dev/null || true
+          git add docs/outputs/*_stats.json 2>/dev/null || true
+          if git diff --cached --quiet; then echo "No changes"; else git commit -m "chore(charts): update long charts & stats (${{ env.INDEX_KEY }})"; git push; fi
