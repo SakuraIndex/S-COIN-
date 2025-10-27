@@ -16,6 +16,10 @@ from datetime import time
 from typing import Tuple, Optional
 
 import pandas as pd
+
+# Headless 環境での描画を安定化
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 JST = "Asia/Tokyo"
@@ -128,6 +132,11 @@ def compute_pct(df_jst: pd.DataFrame, col: str, basis: str, day_anchor: str) -> 
     return latest, "prev_close"
 
 
+def pick_line_color(pct: float) -> str:
+    """騰落率の正負で線色を切替（＋青／−赤）。"""
+    return "#22d3ee" if pct >= 0 else "#fb7185"
+
+
 def make_plot(
     df_jst: pd.DataFrame,
     col: str,
@@ -135,13 +144,17 @@ def make_plot(
     pct_series: pd.Series,
     out_png: str,
     title_label: str,
+    pct_for_color: float,
 ):
-    # 黒ベース・シアン線・外枠なし
+    # 黒ベース
     plt.close("all")
     fig, ax = plt.subplots(figsize=(12, 6), facecolor="#0b0b0b")
     ax.set_facecolor("#0b0b0b")
 
-    ax.plot(pct_series.index, pct_series.values, linewidth=2.0, color="#00e5ff", label=title_label)
+    # 騰落率に応じた線色
+    line_color = pick_line_color(pct_for_color)
+
+    ax.plot(pct_series.index, pct_series.values, linewidth=2.0, color=line_color, label=title_label)
 
     # 枠線消し
     for sp in ax.spines.values():
@@ -155,19 +168,23 @@ def make_plot(
     # 軸ラベル
     y_label = "Change vs Anchor (%)" if basis_label.startswith("open@") else "Change vs Prev Close (%)"
     ax.set_ylabel(y_label)
-    ax.set_xlabel("Time")
+    ax.set_xlabel("Time (JST)")
 
     # タイトル
     ts = pd.Timestamp.now(tz=JST).strftime("%Y/%m/%d %H:%M")
     ax.set_title(f"{title_label} Intraday Snapshot ({ts})", color="#ffffff", fontsize=14)
 
+    # グリッド（控えめ）
+    ax.grid(True, color="#334", linestyle=":", linewidth=0.6, alpha=0.7)
+
     # 凡例
-    leg = ax.legend(facecolor="#1a1a1a", edgecolor="none", labelcolor="#eaeaea")
+    leg = ax.legend(facecolor="#111a24", edgecolor="none", labelcolor="#eaeaea")
     for t in leg.get_texts():
         t.set_color("#eaeaea")
 
     fig.tight_layout()
-    fig.savefig(out_png, dpi=130)
+    # 背景色固定保存
+    fig.savefig(out_png, dpi=130, facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
@@ -196,7 +213,7 @@ def main():
     sess = Session(args.session_start, args.session_end)
     df_sess = filter_session(df_jst, sess)
 
-    # 値の計算
+    # 値の計算（％）
     pct_value, basis_label = compute_pct(df_sess, value_col, args.basis, args.day_anchor)
 
     # プロット用系列
@@ -213,7 +230,7 @@ def main():
         plot_series = df_sess[value_col] - av
         title_label = "S-COIN+"
 
-    # 図を保存
+    # 図を保存（線色は pct_value の正負で決定）
     make_plot(
         df_sess,
         value_col,
@@ -221,6 +238,7 @@ def main():
         plot_series,
         args.snapshot_png,
         title_label,
+        pct_for_color=pct_value,
     )
 
     # テキスト
@@ -243,6 +261,8 @@ def main():
         "basis": basis_label,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
         "updated_at": pd.Timestamp.now(tz=JST).isoformat(),
+        # 将来のサイト側自動判定用に unit を明記（％）
+        "unit": "percent",
     }
     with open(args.out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
