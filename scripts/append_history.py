@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
 Append today's close level into docs/outputs/<index>_history.csv
-
 優先度:
  1) <index>_stats.json の "level"
- 2) <index>_intraday.csv 最終行の値
- 3) 何も取れなければスキップ（非エラー終了）
-
-環境変数:
-  INDEX_KEY   : スラグ (例 scoin_plus)
-  OUT_DIR     : 出力ディレクトリ (既定: docs/outputs)
-  MARKET_TZ   : 表示用タイムゾーン (例 Asia/Tokyo)
+ 2) <index>_intraday.csv の最終値
 """
 
 from __future__ import annotations
@@ -31,10 +23,8 @@ INTRA_CSV = OUT_DIR / f"{INDEX_KEY}_intraday.csv"
 MARKET_TZ = os.environ.get("MARKET_TZ", "Asia/Tokyo")
 
 def log(msg): print(f"[append] {msg}", flush=True)
-
 def today_str(tzname: str) -> str:
-    tz = pytz.timezone(tzname)
-    return datetime.now(tz).strftime("%Y-%m-%d")
+    return datetime.now(pytz.timezone(tzname)).strftime("%Y-%m-%d")
 
 def read_level_from_stats() -> float | None:
     try:
@@ -53,8 +43,7 @@ def read_level_from_intraday() -> float | None:
         if not INTRA_CSV.exists(): return None
         df = pd.read_csv(INTRA_CSV)
         if df.shape[1] < 2: return None
-        val_col = df.columns[1]
-        s = pd.to_numeric(df[val_col], errors="coerce").dropna()
+        s = pd.to_numeric(df[df.columns[1]], errors="coerce").dropna()
         if s.empty: return None
         return float(s.iloc[-1])
     except Exception as e:
@@ -65,8 +54,7 @@ def load_history() -> pd.DataFrame:
     if HIST_CSV.exists():
         try:
             df = pd.read_csv(HIST_CSV)
-            if df.shape[1] == 2:
-                df.columns = ["date","value"]
+            if df.shape[1] == 2: df.columns = ["date","value"]
             df["date"]  = pd.to_datetime(df["date"], errors="coerce").dt.date
             df["value"] = pd.to_numeric(df["value"], errors="coerce")
             df = df.dropna(subset=["date","value"]).drop_duplicates(subset=["date"], keep="last")
@@ -76,27 +64,21 @@ def load_history() -> pd.DataFrame:
     return pd.DataFrame(columns=["date","value"])
 
 def save_history(df: pd.DataFrame):
-    df2 = df.copy()
-    df2 = df2.sort_values("date")
-    df2["date"] = df2["date"].astype(str)
-    HIST_CSV.write_text(df2.to_csv(index=False))
+    d = df.sort_values("date").copy()
+    d["date"] = d["date"].astype(str)
+    HIST_CSV.write_text(d.to_csv(index=False))
 
 def main():
     today = today_str(MARKET_TZ)
     log(f"INDEX={INDEX_KEY} TZ={MARKET_TZ} today={today}")
 
-    level = read_level_from_stats()
+    level = read_level_from_stats() or read_level_from_intraday()
     if level is None:
-        level = read_level_from_intraday()
-
-    if level is None:
-        log("no level found; skip append")
-        return
+        log("no level found; skip append"); return
 
     df = load_history()
-    # upsert
     dt = pd.to_datetime(today).date()
-    df = df[ df["date"] != dt ]
+    df = df[df["date"] != dt]
     df = pd.concat([df, pd.DataFrame([{"date": dt, "value": float(level)}])], ignore_index=True)
     save_history(df)
     log(f"appended {today} -> {level}")
