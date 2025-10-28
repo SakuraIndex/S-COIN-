@@ -2,7 +2,6 @@ name: Close & append history (S-COIN+)
 
 on:
   schedule:
-    # 24h資産なので任意の固定時刻でOK（例: JST 14:05）
     - cron: '05 5 * * *'   # UTC 05:05 = JST 14:05
   workflow_dispatch:
 
@@ -20,10 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0, persist-credentials: true }
-
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-
       - run: pip install -r requirements.txt
 
       - name: Append history (upsert 1 row/day)
