@@ -1,113 +1,53 @@
-name: Generate long-term charts (S-COIN+ 1d/7d/1m/1y + stats)
+name: Generate long-term charts (S-COIN+ 7d/1m/1y)
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *'   # 毎日 10:15 JST
+    - cron: '15 1 * * *'   # JST 10:15 に相当
+  workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: { contents: write }
 
 concurrency:
-  group: long-charts-${{ github.ref }}
+  group: scoinp-long-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     env:
       INDEX_KEY: scoin_plus
+      OUT_DIR: docs/outputs
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: true }
 
-      - name: Resolve
-        id: resolve
-        shell: bash
-        run: |
-          echo "market_tz=Asia/Tokyo"       >> "$GITHUB_OUTPUT"
-          echo "session_start=09:00"        >> "$GITHUB_OUTPUT"
-          echo "session_end=15:30"          >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Install deps
-        shell: bash
-        run: |
-          pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas numpy matplotlib; fi
+      - run: pip install -r requirements.txt
 
-      - name: Clear pycache
-        shell: bash
-        run: rm -rf scripts/__pycache__ || true
-
-      - name: Update history (if available)
-        shell: bash
-        run: |
-          if [ -f scripts/update_history.py ]; then python scripts/update_history.py || true; fi
-
-      - name: Generate long-term charts
-        shell: bash
-        env:
-          MARKET_TZ: ${{ steps.resolve.outputs.market_tz }}
-          SESSION_START: ${{ steps.resolve.outputs.session_start }}
-          SESSION_END: ${{ steps.resolve.outputs.session_end }}
+      - name: Generate long-term charts (level)
         run: |
           python scripts/long_charts.py
-          ls -lah docs/outputs || true
+          ls -lah "$OUT_DIR" || true
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > "$OUT_DIR/_last_run.txt"
 
-      - name: Normalize legacy filenames
-        shell: bash
-        run: |
-          OUTDIR="docs/outputs"; shopt -s nullglob
-          for f in "$OUTDIR"/s_coin__* "$OUTDIR"/s_coin_*; do
-            [ -e "$f" ] || continue
-            base="$(basename "$f")"
-            new="$OUTDIR/${base/s_coin__/scoin_plus_}"
-            new="${new/s_coin_/scoin_plus_}"
-            [ "$f" = "$new" ] || mv -f "$f" "$new"
-          done
-
-      - name: Sanity check - prefix
-        shell: bash
-        env:
-          INDEX_KEY: ${{ env.INDEX_KEY }}
-        run: |
-          OUTDIR="docs/outputs"; shopt -s nullglob; err=0
-          for f in "$OUTDIR"/*; do
-            b="$(basename "$f")"
-            case "$b" in README.md|_last_run.txt) continue;; esac
-            [[ "$b" == "${INDEX_KEY}_"* ]] || { echo "X prefix mismatch: $b"; err=1; }
-          done
-          [ $err -eq 0 ] || exit 1
-          echo "✓ Prefix check passed."
-
-      - name: Commit charts if changed
-        shell: bash
+      - name: Commit PNGs if changed
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/${INDEX_KEY}_{1d,7d,1m,1y}.png 2>/dev/null || true
-          git add docs/outputs/*_stats.json 2>/dev/null || true
+          git add "$OUT_DIR/scoin_plus_"7d.png "$OUT_DIR/scoin_plus_"1m.png "$OUT_DIR/scoin_plus_"1y.png "$OUT_DIR/_last_run.txt"
           if git diff --cached --quiet; then
-            echo "No changes"
+            echo "no changes"
           else
-            git commit -m "chore(charts): update long charts & stats (${INDEX_KEY})"
+            git commit -m "chore(scoin_plus): update long-term charts (7d/1m/1y)"
             git push
           fi
