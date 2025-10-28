@@ -1,14 +1,15 @@
-name: Generate long-term charts (S-COIN+ 7d/1m/1y)
+name: Generate long-term charts (S-COIN+ 7d/1m/1y + stats)
 
 on:
-  schedule:
-    - cron: '15 1 * * *'   # JST 10:15
   workflow_dispatch:
+  schedule:
+    - cron: '15 1 * * *'   # 毎日 10:15 JST (UTCに換算)
 
-permissions: { contents: write }
+permissions:
+  contents: write
 
 concurrency:
-  group: scoinp-long-${{ github.ref }}
+  group: long-charts-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -21,30 +22,55 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0, persist-credentials: true }
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
+
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
-      - run: pip install -r requirements.txt
 
-      - name: Generate long-term charts (level)
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas matplotlib; fi
+
+      # （任意）過去のファイル名の揺れを矯正
+      - name: Normalize legacy filenames
+        shell: bash
+        run: |
+          OUTDIR="docs/outputs"; shopt -s nullglob
+          for f in "$OUTDIR"/s_coin__* "$OUTDIR"/s_coin_*; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"
+            new="$OUTDIR/${base/s_coin__/scoin_plus_}"
+            new="${new/s_coin_/scoin_plus_}"
+            [ "$f" = "$new" ] || mv -f "$f" "$new"
+          done
+
+      - name: Generate long charts (7d/1m/1y)
         run: |
           python scripts/long_charts.py
           ls -lah "$OUT_DIR" || true
-          date -u +"%Y-%m-%dT%H:%M:%SZ" > "$OUT_DIR/_last_run.txt"
 
-      - name: Commit PNGs if changed
+      - name: Commit charts if changed
+        shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$OUT_DIR/scoin_plus_7d.png" "$OUT_DIR/scoin_plus_1m.png" "$OUT_DIR/scoin_plus_1y.png" "$OUT_DIR/_last_run.txt"
+          git config --global safe.directory "$(pwd)"
+          # 1d は含めない
+          git add "$OUT_DIR/${INDEX_KEY}_{7d,1m,1y}.png" 2>/dev/null || true
+          git add "$OUT_DIR"/*_stats.json 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "no changes"
+            echo "No changes"
           else
-            git commit -m "chore(scoin_plus): update long-term charts (7d/1m/1y)"
+            git commit -m "chore(scoin_plus): update long-term charts (7d/1m/1y) + stats"
             git push
           fi
