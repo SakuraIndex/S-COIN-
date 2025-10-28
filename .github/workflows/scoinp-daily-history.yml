@@ -1,0 +1,45 @@
+name: Close & append history (S-COIN+)
+
+on:
+  schedule:
+    # 24h資産なので任意の固定時刻でOK（例: JST 14:05）
+    - cron: '05 5 * * *'   # UTC 05:05 = JST 14:05
+  workflow_dispatch:
+
+permissions: { contents: write }
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      INDEX_KEY: scoin_plus
+      OUT_DIR: docs/outputs
+      MARKET_TZ: Asia/Tokyo
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: true }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - run: pip install -r requirements.txt
+
+      - name: Append history (upsert 1 row/day)
+        run: |
+          python scripts/append_history.py
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > "$OUT_DIR/_last_run.txt"
+          tail -n 5 "$OUT_DIR/scoin_plus_history.csv" || true
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$OUT_DIR/scoin_plus_history.csv" "$OUT_DIR/_last_run.txt"
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "chore(scoin_plus): append daily history"
+            git push
+          fi
