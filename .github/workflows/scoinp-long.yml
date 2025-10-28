@@ -2,7 +2,7 @@ name: Generate long-term charts (S-COIN+ 7d/1m/1y)
 
 on:
   schedule:
-    - cron: '15 1 * * *'   # JST 10:15 に相当
+    - cron: '15 1 * * *'   # JST 10:15
   workflow_dispatch:
 
 permissions: { contents: write }
@@ -22,16 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0, persist-credentials: true }
-
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
-
       - run: pip install -r requirements.txt
 
       - name: Generate long-term charts (level)
@@ -44,7 +41,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$OUT_DIR/scoin_plus_"7d.png "$OUT_DIR/scoin_plus_"1m.png "$OUT_DIR/scoin_plus_"1y.png "$OUT_DIR/_last_run.txt"
+          git add "$OUT_DIR/scoin_plus_7d.png" "$OUT_DIR/scoin_plus_1m.png" "$OUT_DIR/scoin_plus_1y.png" "$OUT_DIR/_last_run.txt"
           if git diff --cached --quiet; then
             echo "no changes"
           else
