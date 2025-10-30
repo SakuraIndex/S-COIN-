@@ -58,7 +58,8 @@ jobs:
             exit 0
           fi
 
-      - name: Build intraday CSV (JP equities)
+      # ★ 重要：常に“今日のJSTのみ”を抽出。今日のデータが閾値未満なら失敗で終了（古いCSVを使わない）
+      - name: Build intraday CSV (JP equities, today-only)
         run: |
           if [ -f tickers_scoinp.txt ]; then
             echo "Building intraday CSV from tickers_scoinp.txt"
@@ -70,24 +71,28 @@ jobs:
               echo "    tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]"
               echo "jst = pytz.timezone('Asia/Tokyo')"
               echo "today = dt.datetime.now(jst).date()"
-              echo "start = jst.localize(dt.datetime(today.year, today.month, today.day, 9, 0))"
-              echo "end   = jst.localize(dt.datetime(today.year, today.month, today.day, 15, 30))"
               echo "frames = []"
               echo "for t in tickers:"
               echo "    try:"
-              echo "        df = yf.download(t, start=start, end=end, interval='1m', progress=False, auto_adjust=True)"
+              echo "        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)"
               echo "    except Exception as e:"
               echo "        print('download failed', t, e); continue"
               echo "    if df is None or df.empty: continue"
+              echo "    # 取引所TZ→JSTに揃え、今日だけ抽出"
+              echo "    if df.index.tz is None:"
+              echo "        df.index = df.index.tz_localize('UTC')"
+              echo "    df = df.tz_convert(jst)"
+              echo "    df = df[df.index.date == today]"
+              echo "    if df.empty: continue"
               echo "    df = df[['Close']].rename(columns={'Close': t})"
               echo "    frames.append(df)"
-              echo "if not frames: sys.exit(0)"
-              echo "px = pd.concat(frames, axis=1).dropna(how='all')"
-              echo "px.index = px.index.tz_convert(jst)"
+              echo "if not frames:"
+              echo "    print('NO_TODAY_DATA'); sys.exit(2)"
+              echo "px = pd.concat(frames, axis=1).sort_index().dropna(how='all')"
               echo "px['Datetime'] = px.index"
               echo "px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)"
               echo "px[['Datetime','Index']].to_csv(csv_path, index=False)"
-              echo "print('CSV written:', csv_path)"
+              echo "print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())"
             } > build_csv.py
             python build_csv.py
           else
@@ -113,7 +118,6 @@ jobs:
 
       - name: Generate intraday snapshot (with legacy fallback)
         run: |
-          # decide output png
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
 
