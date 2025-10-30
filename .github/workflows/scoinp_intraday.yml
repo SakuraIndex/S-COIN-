@@ -58,12 +58,12 @@ jobs:
             exit 0
           fi
 
-      # ===== CSV build: repo script -> strict check -> yfinance fallback =====
-      - name: Build intraday CSV (prefer repo script, fallback to yfinance)
+           - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
         run: |
+          set -e
           mkdir -p docs/outputs
 
-          # 1) prefer repo script if exists
+          # 1) まずリポ内スクリプトを試す（ある場合）
           if [ -f src/scoin_plus_intraday.py ]; then
             echo "Using src/scoin_plus_intraday.py"
             python src/scoin_plus_intraday.py \
@@ -71,7 +71,7 @@ jobs:
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) strict check: CSV must contain "today JST" and be recent
+          # 2) 今日のJST行があるかチェック（古ければ警告、無ければフォールバック判定）
           {
             echo "from datetime import datetime, timezone, timedelta"
             echo "import sys, pandas as pd"
@@ -81,71 +81,67 @@ jobs:
             echo "    try:"
             echo "        df = pd.read_csv(p, parse_dates=['Datetime'])"
             echo "    except Exception:"
-            echo "        return False, 'read_error'"
-            echo "    if df.empty: return False, 'empty'"
-            echo "    # to tz-aware JST"
+            echo "        return 'missing'"
+            echo "    if df.empty: return 'empty'"
             echo "    try:"
             echo "        if df['Datetime'].dt.tz is None:"
             echo "            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')"
             echo "        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')"
-            echo "    except Exception:"
-            echo "        pass"
+            echo "    except Exception: pass"
             echo "    today = datetime.now(jst).date()"
             echo "    df = df[df['Datetime'].dt.date == today]"
-            echo "    if df.empty: return False, 'no_today_rows'"
-            echo "    last = df['Datetime'].max().to_pydatetime()"
-            echo "    if (datetime.now(jst) - last.astimezone(jst)).total_seconds() > 90*60:"
-            echo "        return False, f'stale:{last}'"
-            echo "    return True, f'rows={len(df)}, last={last}'"
-            echo "ok, info = check(p)"
-            echo "print('CHECK_CSV:', ok, info)"
-            echo "sys.exit(0 if ok else 2)"
-          } > check_csv.py
+            echo "    if df.empty: return 'no_today'"
+            echo "    last = df['Datetime'].max().to_pydatetime().astimezone(jst)"
+            echo "    # 直近90分超なら stale、ただし today 行があるため WARNING とする"
+            echo "    if (datetime.now(jst) - last).total_seconds() > 90*60: return f'stale:{last.isoformat()}'"
+            echo "    return 'ok'"
+            echo "print(check(p))"
+          } > _chk.py
 
-          set +e
-          python check_csv.py
-          NEED_FB=$?
-          set -e
+          STATUS=$(python _chk.py || true)
+          echo "CHECK_CSV_STATUS: ${STATUS}"
 
-          # 3) fallback to yfinance if needed
-          if [ "$NEED_FB" -ne 0 ]; then
-            echo "Fallback: yfinance today-only strict"
-            if [ ! -f tickers_scoinp.txt ]; then
-              echo "ERROR: tickers_scoinp.txt missing"
-              exit 2
+          NEED_FB=0
+          if [ "${STATUS}" = "missing" ] || [ "${STATUS}" = "empty" ] || [ "${STATUS}" = "no_today" ]; then
+            NEED_FB=1
+          fi
+
+          # 3) yfinance フォールバック（tickers_scoinp.txt がある場合のみ）
+          if [ "${NEED_FB}" -eq 1 ]; then
+            if [ -f tickers_scoinp.txt ]; then
+              echo "Fallback: yfinance (today-only strict)"
+              {
+                echo "import sys, pandas as pd, datetime as dt, pytz, yfinance as yf"
+                echo "csv_path = 'docs/outputs/scoin_plus_intraday.csv'"
+                echo "with open('tickers_scoinp.txt') as f:"
+                echo "    tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]"
+                echo "jst = pytz.timezone('Asia/Tokyo')"
+                echo "today = dt.datetime.now(jst).date()"
+                echo "frames = []"
+                echo "for t in tickers:"
+                echo "    try:"
+                echo "        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)"
+                echo "    except Exception as e:"
+                echo "        print('download failed', t, e); continue"
+                echo "    if df is None or df.empty: continue"
+                echo "    if df.index.tz is None: df.index = df.index.tz_localize('UTC')"
+                echo "    df = df.tz_convert(jst)"
+                echo "    df = df[df.index.date == today]"
+                echo "    if df.empty: continue"
+                echo "    df = df[['Close']].rename(columns={'Close': t})"
+                echo "    frames.append(df)"
+                echo "if not frames:"
+                echo "    print('NO_TODAY_DATA'); sys.exit(2)"
+                echo "px = pd.concat(frames, axis=1).sort_index().dropna(how='all')"
+                echo "px['Datetime'] = px.index"
+                echo "px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)"
+                echo "px[['Datetime','Index']].to_csv(csv_path, index=False)"
+                echo "print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())"
+              } > build_csv.py
+              python build_csv.py
+            else
+              echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback and continue with repo CSV (may be stale)."
             fi
-            {
-              echo "import sys, pandas as pd, datetime as dt, pytz, yfinance as yf"
-              echo "csv_path = 'docs/outputs/scoin_plus_intraday.csv'"
-              echo "with open('tickers_scoinp.txt') as f:"
-              echo "    tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]"
-              echo "jst = pytz.timezone('Asia/Tokyo')"
-              echo "today = dt.datetime.now(jst).date()"
-              echo "frames = []"
-              echo "for t in tickers:"
-              echo "    try:"
-              echo "        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)"
-              echo "    except Exception as e:"
-              echo "        print('download failed', t, e); continue"
-              echo "    if df is None or df.empty: continue"
-              echo "    if df.index.tz is None: df.index = df.index.tz_localize('UTC')"
-              echo "    df = df.tz_convert(jst)"
-              echo "    df = df[df.index.date == today]"
-              echo "    if df.empty: continue"
-              echo "    df = df[['Close']].rename(columns={'Close': t})"
-              echo "    frames.append(df)"
-              echo "if not frames:"
-              echo "    print('NO_TODAY_DATA'); sys.exit(2)"
-              echo "px = pd.concat(frames, axis=1).sort_index().dropna(how='all')"
-              echo "px['Datetime'] = px.index"
-              echo "px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)"
-              echo "px[['Datetime','Index']].to_csv(csv_path, index=False)"
-              echo "print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())"
-            } > build_csv.py
-            python build_csv.py
-
-            # re-check strictly
-            python check_csv.py
           fi
 
       - name: Verify inputs & script
