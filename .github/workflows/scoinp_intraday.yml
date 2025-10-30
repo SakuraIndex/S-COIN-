@@ -9,10 +9,9 @@ on:
       basis:         { description: "Return basis label", required: true, default: "prev_close" }
       value_type:    { description: "auto | ratio | percent", required: false, default: "auto" }
 
-  # 平日 AM/PM の定期実行（不要なら削除OK）
   schedule:
-    - cron: "35 2 * * 1-5"   # JST 11:35
-    - cron: "35 6 * * 1-5"   # JST 15:35
+    - cron: "35 2 * * 1-5"   # JST 11:35（AM スナップ）
+    - cron: "35 6 * * 1-5"   # JST 15:35（引け後）
 
 permissions:
   contents: write
@@ -45,7 +44,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -56,9 +55,60 @@ jobs:
 
       - name: Install deps
         run: |
-          set -e
           python -m pip install -U pip
-          python -m pip install pandas matplotlib
+          python -m pip install pandas matplotlib yfinance pytz
+
+      - name: Skip when market closed (JST)
+        run: |
+          H=$(TZ=Asia/Tokyo date +%H%M)
+          if [ "$H" -lt 0900 ] || [ "$H" -gt 1530 ]; then
+            echo "Market closed — skip."
+            exit 0
+          fi
+
+      - name: Build intraday CSV if tickers exist (JP equities)
+        run: |
+          set -e
+          if [ -f tickers_scoinp.txt ]; then
+            python - << 'PY'
+import os, sys, pandas as pd, datetime as dt
+import pytz
+try:
+    import yfinance as yf
+except Exception as e:
+    print('yfinance import error:', e); sys.exit(1)
+
+csv_path = "docs/outputs/scoin_plus_intraday.csv"
+with open("tickers_scoinp.txt") as f:
+    tickers=[t.strip() for t in f if t.strip() and not t.startswith('#')]
+
+jst = pytz.timezone('Asia/Tokyo')
+now = dt.datetime.now(jst)
+today = now.date()
+start = jst.localize(dt.datetime(today.year, today.month, today.day, 9, 0))
+end   = jst.localize(dt.datetime(today.year, today.month, today.day, 15, 30))
+frames=[]
+for t in tickers:
+    try:
+        df = yf.download(t, start=start, end=end, interval='1m', progress=False, auto_adjust=True)
+    except Exception as e:
+        print('download failed:', t, e); continue
+    if df is None or df.empty: continue
+    df = df[['Close']].rename(columns={'Close': t})
+    frames.append(df)
+if not frames:
+    print('no intraday data fetched — keep existing CSV if any')
+    sys.exit(0)
+px = pd.concat(frames, axis=1).dropna(how='all')
+px.index = px.index.tz_convert(jst)
+px['Datetime'] = px.index
+px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)
+px[['Datetime','Index']].to_csv(csv_path, index=False)
+print('Wrote', csv_path, len(px))
+PY
+          else
+            echo "tickers_scoinp.txt not found — use existing CSV if present"
+          fi
 
       - name: Verify inputs & script
         run: |
@@ -98,7 +148,6 @@ jobs:
           echo "=== Generate ${LABEL} intraday (${PUBLISH_VARIANT:-pm}) ==="
           echo "[try] extended CLI (with --label/--dt-col/--value-type)"
 
-          # set -e を一時解除して成否を自分で判定し、ダメなら旧CLIへ
           set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -152,6 +201,8 @@ jobs:
           if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
           elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
           fi
+          # last_run.txt を書き込み（JST）
+          TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
           ls -l "${dst}"
 
       - name: Commit & push site charts
@@ -164,6 +215,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes for site."
           else
-            git commit -m "Update S-COIN+ intraday charts ($(date '+%Y-%m-%d %H:%M JST'))"
+            git commit -m "Update S-COIN+ intraday charts ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST'))"
             git push origin "${SITE_BRANCH}"
           fi
