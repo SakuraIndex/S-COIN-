@@ -58,12 +58,62 @@ jobs:
             exit 0
           fi
 
-      # ★ 重要：常に“今日のJSTのみ”を抽出。今日のデータが閾値未満なら失敗で終了（古いCSVを使わない）
-      - name: Build intraday CSV (JP equities, today-only)
+      # ===== CSV build: repo script -> strict check -> yfinance fallback =====
+      - name: Build intraday CSV (prefer repo script, fallback to yfinance)
         run: |
-          if [ -f tickers_scoinp.txt ]; then
-            echo "Building intraday CSV from tickers_scoinp.txt"
-            mkdir -p docs/outputs
+          mkdir -p docs/outputs
+
+          # 1) prefer repo script if exists
+          if [ -f src/scoin_plus_intraday.py ]; then
+            echo "Using src/scoin_plus_intraday.py"
+            python src/scoin_plus_intraday.py \
+              --out "docs/outputs/scoin_plus_intraday.csv" \
+              --start "09:00" --end "15:30" || true
+          fi
+
+          # 2) strict check: CSV must contain "today JST" and be recent
+          {
+            echo "from datetime import datetime, timezone, timedelta"
+            echo "import sys, pandas as pd"
+            echo "jst = timezone(timedelta(hours=9))"
+            echo "p = 'docs/outputs/scoin_plus_intraday.csv'"
+            echo "def check(p):"
+            echo "    try:"
+            echo "        df = pd.read_csv(p, parse_dates=['Datetime'])"
+            echo "    except Exception:"
+            echo "        return False, 'read_error'"
+            echo "    if df.empty: return False, 'empty'"
+            echo "    # to tz-aware JST"
+            echo "    try:"
+            echo "        if df['Datetime'].dt.tz is None:"
+            echo "            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')"
+            echo "        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')"
+            echo "    except Exception:"
+            echo "        pass"
+            echo "    today = datetime.now(jst).date()"
+            echo "    df = df[df['Datetime'].dt.date == today]"
+            echo "    if df.empty: return False, 'no_today_rows'"
+            echo "    last = df['Datetime'].max().to_pydatetime()"
+            echo "    if (datetime.now(jst) - last.astimezone(jst)).total_seconds() > 90*60:"
+            echo "        return False, f'stale:{last}'"
+            echo "    return True, f'rows={len(df)}, last={last}'"
+            echo "ok, info = check(p)"
+            echo "print('CHECK_CSV:', ok, info)"
+            echo "sys.exit(0 if ok else 2)"
+          } > check_csv.py
+
+          set +e
+          python check_csv.py
+          NEED_FB=$?
+          set -e
+
+          # 3) fallback to yfinance if needed
+          if [ "$NEED_FB" -ne 0 ]; then
+            echo "Fallback: yfinance today-only strict"
+            if [ ! -f tickers_scoinp.txt ]; then
+              echo "ERROR: tickers_scoinp.txt missing"
+              exit 2
+            fi
             {
               echo "import sys, pandas as pd, datetime as dt, pytz, yfinance as yf"
               echo "csv_path = 'docs/outputs/scoin_plus_intraday.csv'"
@@ -78,9 +128,7 @@ jobs:
               echo "    except Exception as e:"
               echo "        print('download failed', t, e); continue"
               echo "    if df is None or df.empty: continue"
-              echo "    # 取引所TZ→JSTに揃え、今日だけ抽出"
-              echo "    if df.index.tz is None:"
-              echo "        df.index = df.index.tz_localize('UTC')"
+              echo "    if df.index.tz is None: df.index = df.index.tz_localize('UTC')"
               echo "    df = df.tz_convert(jst)"
               echo "    df = df[df.index.date == today]"
               echo "    if df.empty: continue"
@@ -95,13 +143,13 @@ jobs:
               echo "print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())"
             } > build_csv.py
             python build_csv.py
-          else
-            echo "tickers_scoinp.txt not found — using existing CSV"
+
+            # re-check strictly
+            python check_csv.py
           fi
 
       - name: Verify inputs & script
         run: |
-          set -e
           test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
           test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
           mkdir -p "${OUT_DIR}"
@@ -145,47 +193,3 @@ jobs:
               --index-key "${INDEX_KEY}" \
               --csv "${CSV}" \
               --out-json "${OUT_JSON}" \
-              --out-text "${OUT_TEXT}" \
-              --snapshot-png "${SNAP}" \
-              --session-start 09:00 \
-              --session-end 15:30 \
-              --day-anchor 09:00 \
-              --basis prev_close
-          fi
-
-          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
-
-      - name: Checkout site repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.SITE_REPO }}
-          ref: ${{ env.SITE_BRANCH }}
-          token: ${{ env.PUBLISH_TOKEN }}
-          path: site
-          fetch-depth: 0
-
-      - name: Copy into site tree
-        run: |
-          set -e
-          dst="site/${PUBLISH_DIR}"
-          mkdir -p "${dst}"
-          cp -f "${OUT_JSON}" "${dst}/stats.json"
-          cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
-          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
-          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
-          fi
-          TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
-          ls -l "${dst}"
-
-      - name: Commit & push site charts
-        working-directory: site
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes for site."
-          else
-            git commit -m "Update S-COIN+ intraday ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST'))"
-            git push origin "${SITE_BRANCH}"
-          fi
