@@ -1,4 +1,4 @@
-name: "S-COIN+ • intraday + publish (JST 09:00–15:30)"
+name: "S-COIN+ • intraday + publish (JST 09:00-15:30)"
 
 on:
   workflow_dispatch:
@@ -39,7 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -58,12 +59,12 @@ jobs:
             exit 0
           fi
 
-           - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
+      - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
         run: |
           set -e
           mkdir -p docs/outputs
 
-          # 1) まずリポ内スクリプトを試す（ある場合）
+          # 1) prefer repo script
           if [ -f src/scoin_plus_intraday.py ]; then
             echo "Using src/scoin_plus_intraday.py"
             python src/scoin_plus_intraday.py \
@@ -71,7 +72,7 @@ jobs:
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) 今日のJST行があるかチェック（古ければ警告、無ければフォールバック判定）
+          # 2) check today's rows (JST)
           {
             echo "from datetime import datetime, timezone, timedelta"
             echo "import sys, pandas as pd"
@@ -92,7 +93,6 @@ jobs:
             echo "    df = df[df['Datetime'].dt.date == today]"
             echo "    if df.empty: return 'no_today'"
             echo "    last = df['Datetime'].max().to_pydatetime().astimezone(jst)"
-            echo "    # 直近90分超なら stale、ただし today 行があるため WARNING とする"
             echo "    if (datetime.now(jst) - last).total_seconds() > 90*60: return f'stale:{last.isoformat()}'"
             echo "    return 'ok'"
             echo "print(check(p))"
@@ -106,7 +106,7 @@ jobs:
             NEED_FB=1
           fi
 
-          # 3) yfinance フォールバック（tickers_scoinp.txt がある場合のみ）
+          # 3) fallback to yfinance if tickers file exists
           if [ "${NEED_FB}" -eq 1 ]; then
             if [ -f tickers_scoinp.txt ]; then
               echo "Fallback: yfinance (today-only strict)"
@@ -140,7 +140,7 @@ jobs:
               } > build_csv.py
               python build_csv.py
             else
-              echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback and continue with repo CSV (may be stale)."
+              echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback."
             fi
           fi
 
@@ -189,3 +189,46 @@ jobs:
               --index-key "${INDEX_KEY}" \
               --csv "${CSV}" \
               --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAP}" \
+              --session-start 09:00 \
+              --session-end 15:30 \
+              --day-anchor 09:00 \
+              --basis prev_close
+          fi
+
+          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
+
+      - name: Checkout site repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SITE_REPO }}
+          ref: ${{ env.SITE_BRANCH }}
+          token: ${{ env.PUBLISH_TOKEN }}
+          path: site
+          fetch-depth: 0
+
+      - name: Copy into site tree
+        run: |
+          dst="site/${PUBLISH_DIR}"
+          mkdir -p "${dst}"
+          cp -f "${OUT_JSON}" "${dst}/stats.json"
+          cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
+          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
+          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
+          fi
+          TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
+          ls -l "${dst}"
+
+      - name: Commit & push site charts
+        working-directory: site
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes for site."
+          else
+            git commit -m "Update S-COIN+ intraday ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST'))"
+            git push origin "${SITE_BRANCH}"
+          fi
