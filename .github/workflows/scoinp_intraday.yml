@@ -20,14 +20,10 @@ env:
   DT_COL: "Datetime"
   BASIS_DEFAULT: prev_close
   VALUE_TYPE_DEFAULT: auto
-
-  # publish target
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/S-COIN+
   PUBLISH_TOKEN: ${{ secrets.SITE_PAT || secrets.SITE_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
-
-  # local outputs
   OUT_DIR: docs/outputs
   OUT_JSON: docs/outputs/scoinp_stats.json
   OUT_TEXT: docs/outputs/scoinp_post_intraday.txt
@@ -65,45 +61,34 @@ jobs:
           if [ -f tickers_scoinp.txt ]; then
             echo "🪙 Building intraday CSV from tickers_scoinp.txt"
             mkdir -p docs/outputs
-            cat > build_csv.py << 'PY'
-import os, sys, pandas as pd, datetime as dt, pytz
-import yfinance as yf
-
-csv_path = "docs/outputs/scoin_plus_intraday.csv"
+            echo 'import os,sys,pandas as pd,datetime as dt,pytz,yfinance as yf
+csv_path="docs/outputs/scoin_plus_intraday.csv"
 with open("tickers_scoinp.txt") as f:
-    tickers = [t.strip() for t in f if t.strip() and not t.startswith("#")]
-
-jst = pytz.timezone("Asia/Tokyo")
-today = dt.datetime.now(jst).date()
-start = jst.localize(dt.datetime(today.year, today.month, today.day, 9, 0))
-end   = jst.localize(dt.datetime(today.year, today.month, today.day, 15, 30))
-
+    tickers=[t.strip() for t in f if t.strip() and not t.startswith("#")]
+jst=pytz.timezone("Asia/Tokyo")
+today=dt.datetime.now(jst).date()
+start=jst.localize(dt.datetime(today.year,today.month,today.day,9,0))
+end=jst.localize(dt.datetime(today.year,today.month,today.day,15,30))
 frames=[]
 for t in tickers:
     try:
-        df = yf.download(t, start=start, end=end, interval="1m", progress=False, auto_adjust=True)
+        df=yf.download(t,start=start,end=end,interval="1m",progress=False,auto_adjust=True)
     except Exception as e:
-        print("Download failed", t, e)
-        continue
-    if df is None or df.empty:
-        continue
-    df = df[["Close"]].rename(columns={"Close": t})
+        print("Download failed",t,e);continue
+    if df is None or df.empty:continue
+    df=df[["Close"]].rename(columns={"Close":t})
     frames.append(df)
-
 if not frames:
-    print("⚠️ No intraday data fetched — keep existing CSV if any")
-    sys.exit(0)
-
-px = pd.concat(frames, axis=1).dropna(how="all")
-px.index = px.index.tz_convert(jst)
-px["Datetime"] = px.index
-px["Index"] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)
-px[["Datetime","Index"]].to_csv(csv_path, index=False)
-print("✅ CSV written:", csv_path, len(px))
-PY
+    print("⚠️ No intraday data fetched — keep existing CSV if any");sys.exit(0)
+px=pd.concat(frames,axis=1).dropna(how="all")
+px.index=px.index.tz_convert(jst)
+px["Datetime"]=px.index
+px["Index"]=px[[c for c in px.columns if c in tickers]].mean(axis=1,skipna=True)
+px[["Datetime","Index"]].to_csv(csv_path,index=False)
+print("✅ CSV written:",csv_path,len(px))' > build_csv.py
             python build_csv.py
           else
-            echo "⚠️ tickers_scoinp.txt not found — using existing CSV (if any)"
+            echo "⚠️ tickers_scoinp.txt not found — using existing CSV"
           fi
 
       - name: Verify inputs & script
@@ -158,12 +143,8 @@ PY
           mkdir -p "${dst}"
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
-          # AM/PM どちらでも intraday.png に統一
-          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
-          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
-          fi
+          if [ -f "${SNAPSHOT_PNG}" ]; then cp -f "${SNAPSHOT_PNG}" "${dst}/intraday.png"; fi
           TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
-          ls -l "${dst}"
 
       - name: Commit & push site charts
         working-directory: site
