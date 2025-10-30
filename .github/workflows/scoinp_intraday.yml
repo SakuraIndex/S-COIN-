@@ -77,14 +77,11 @@ jobs:
               echo "    try:"
               echo "        df = yf.download(t, start=start, end=end, interval='1m', progress=False, auto_adjust=True)"
               echo "    except Exception as e:"
-              echo "        print('download failed', t, e)"
-              echo "        continue"
-              echo "    if df is None or df.empty:"
-              echo "        continue"
+              echo "        print('download failed', t, e); continue"
+              echo "    if df is None or df.empty: continue"
               echo "    df = df[['Close']].rename(columns={'Close': t})"
               echo "    frames.append(df)"
-              echo "if not frames:"
-              echo "    sys.exit(0)"
+              echo "if not frames: sys.exit(0)"
               echo "px = pd.concat(frames, axis=1).dropna(how='all')"
               echo "px.index = px.index.tz_convert(jst)"
               echo "px['Datetime'] = px.index"
@@ -114,11 +111,14 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate intraday snapshot
+      - name: Generate intraday snapshot (with legacy fallback)
         run: |
-          set -e
+          # decide output png
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
+
+          echo "Try: extended CLI"
+          set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -132,6 +132,24 @@ jobs:
             --label "${LABEL}" \
             --dt-col "${DT_COL}" \
             --value-type auto
+          rc=$?
+          set -e
+
+          if [ $rc -ne 0 ]; then
+            echo "[fallback] legacy CLI"
+            python scripts/make_intraday_post.py \
+              --index-key "${INDEX_KEY}" \
+              --csv "${CSV}" \
+              --out-json "${OUT_JSON}" \
+              --out-text "${OUT_TEXT}" \
+              --snapshot-png "${SNAP}" \
+              --session-start 09:00 \
+              --session-end 15:30 \
+              --day-anchor 09:00 \
+              --basis prev_close
+          fi
+
+          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
 
       - name: Checkout site repo
         uses: actions/checkout@v4
@@ -149,7 +167,9 @@ jobs:
           mkdir -p "${dst}"
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
-          if [ -f "${SNAPSHOT_PNG}" ]; then cp -f "${SNAPSHOT_PNG}" "${dst}/intraday.png"; fi
+          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
+          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
+          fi
           TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
           ls -l "${dst}"
 
