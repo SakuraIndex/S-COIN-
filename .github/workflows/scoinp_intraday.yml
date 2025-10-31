@@ -27,22 +27,24 @@ env:
   PUBLISH_TOKEN: ${{ secrets.SITE_PAT || secrets.SITE_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
   OUT_DIR: docs/outputs
-  OUT_JSON: docs/outputs/scoin_plus_stats.json
-  OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
-  SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
-  SNAPSHOT_AM_PNG: docs/outputs/scoin_plus_intraday_am.png
+  OUT_JSON: docs/outputs/scoinp_stats.json
+  OUT_TEXT: docs/outputs/scoinp_post_intraday.txt
+  SNAPSHOT_PNG: docs/outputs/scoinp_intraday.png
+  SNAPSHOT_AM_PNG: docs/outputs/scoinp_intraday_am.png
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (this repo)
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -51,8 +53,11 @@ jobs:
         run: |
           set -euo pipefail
           python -V
-          pip install -U pip
-          pip install -U --no-cache-dir pandas matplotlib pytz yfinance
+          python -m pip install -U pip
+          # 失敗しても即死しないように再試行（軽い保険）
+          for pkg in pandas matplotlib pytz yfinance; do
+            python -m pip install -U --no-cache-dir "$pkg" || python -m pip install -U "$pkg"
+          done
 
       - name: Skip when market closed (JST)
         shell: bash
@@ -75,7 +80,7 @@ jobs:
           fi
 
           echo "=== STEP2: freshness check ==="
-          cat > _chk.py <<'EOF'
+          cat > _chk.py <<'PY'
 from datetime import datetime, timedelta, timezone
 import os, sys
 import pandas as pd
@@ -116,7 +121,7 @@ if (datetime.now(JST) - last).total_seconds() > 5400:
 
 print('CHECK_CSV_STATUS: ok')
 sys.exit(0)
-EOF
+PY
 
           if python _chk.py; then
             NEED_FB=0
@@ -127,7 +132,7 @@ EOF
 
           if [ "${NEED_FB}" -eq 1 ] && [ -f tickers_scoinp.txt ]; then
             echo "=== STEP3: yfinance fallback ==="
-            cat > build_csv.py <<'EOF'
+            cat > build_csv.py <<'PY'
 import os, sys, pandas as pd, datetime as dt, pytz, yfinance as yf
 csv_path='docs/outputs/scoin_plus_intraday.csv'
 tickers=[t.strip() for t in open('tickers_scoinp.txt') if t.strip() and not t.startswith('#')] if os.path.exists('tickers_scoinp.txt') else []
@@ -156,7 +161,7 @@ cols=[c for c in px.columns if c in tickers]
 px['Index']=px[cols].mean(axis=1, skipna=True)
 px[['Datetime','Index']].to_csv(csv_path, index=False)
 print('CSV written:', csv_path, 'rows=', len(px))
-EOF
+PY
             python build_csv.py
           fi
 
@@ -177,8 +182,9 @@ EOF
           else
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
+          echo "Variant=${PUBLISH_VARIANT:-pm}"
 
-      - name: Generate intraday snapshot (ext CLI -> legacy fallback)
+      - name: Generate intraday snapshot (extended CLI -> legacy fallback)
         shell: bash
         run: |
           SNAP="${SNAPSHOT_PNG}"
@@ -217,6 +223,17 @@ EOF
 
           ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
 
+      - name: Validate outputs (existence/size)
+        shell: bash
+        run: |
+          SNAP="${SNAPSHOT_PNG}"
+          [ "${PUBLISH_VARIANT:-pm}" = "am" ] && SNAP="${SNAPSHOT_AM_PNG}"
+          test -s "${OUT_JSON}"
+          test -s "${OUT_TEXT}"
+          test -s "${SNAP}"
+          # サイズが小さすぎる＝空画像の早期検出（閾値は軽めに）
+          [ $(stat -c%s "${SNAP}") -ge 8192 ]
+
       - name: Checkout site repo
         uses: actions/checkout@v4
         with:
@@ -231,11 +248,11 @@ EOF
         run: |
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
+          SNAP="${SNAPSHOT_PNG}"
+          [ "${PUBLISH_VARIANT:-pm}" = "am" ] && SNAP="${SNAPSHOT_AM_PNG}"
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
-          if   [ -f "${SNAPSHOT_PNG}"    ]; then cp -f "${SNAPSHOT_PNG}"    "${dst}/intraday.png"
-          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then cp -f "${SNAPSHOT_AM_PNG}" "${dst}/intraday.png"
-          fi
+          cp -f "${SNAP}"      "${dst}/intraday.png"
           TZ=Asia/Tokyo date '+%Y/%m/%d %H:%M' > "${dst}/last_run.txt"
           ls -l "${dst}"
 
