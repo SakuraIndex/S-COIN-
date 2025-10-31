@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: scoinp-intraday-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   INDEX_KEY: S_COIN_PLUS
@@ -35,7 +35,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +46,25 @@ jobs:
         with:
           python-version: "3.11"
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
       - name: Install deps
         run: |
           python -m pip install -U pip
-          python -m pip install pandas matplotlib yfinance pytz
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install pandas matplotlib yfinance pytz
+          fi
 
       - name: Skip when market closed (JST)
         run: |
           H=$(TZ=Asia/Tokyo date +%H%M)
+          # 09:00〜15:30 以外はスキップ
           if [ "$H" -lt 0900 ] || [ "$H" -gt 1530 ]; then
             echo "Market closed — skip."
             exit 0
@@ -64,7 +75,7 @@ jobs:
           set -e
           mkdir -p docs/outputs
 
-          # 1) prefer repo script
+          # 1) repo スクリプトを最優先
           if [ -f src/scoin_plus_intraday.py ]; then
             echo "Using src/scoin_plus_intraday.py"
             python src/scoin_plus_intraday.py \
@@ -72,17 +83,15 @@ jobs:
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) check today's rows (JST)
+          # 2) 当日データの有無と “古さ” を検査（90分以上古ければ再取得）
           {
             echo "from datetime import datetime, timezone, timedelta"
             echo "import sys, pandas as pd"
             echo "jst = timezone(timedelta(hours=9))"
             echo "p = 'docs/outputs/scoin_plus_intraday.csv'"
             echo "def check(p):"
-            echo "    try:"
-            echo "        df = pd.read_csv(p, parse_dates=['Datetime'])"
-            echo "    except Exception:"
-            echo "        return 'missing'"
+            echo "    try: df = pd.read_csv(p, parse_dates=['Datetime'])"
+            echo "    except Exception: return 'missing'"
             echo "    if df.empty: return 'empty'"
             echo "    try:"
             echo "        if df['Datetime'].dt.tz is None:"
@@ -102,11 +111,11 @@ jobs:
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
-          if [ "${STATUS}" = "missing" ] || [ "${STATUS}" = "empty" ] || [ "${STATUS}" = "no_today" ]; then
-            NEED_FB=1
-          fi
+          case "${STATUS}" in
+            missing|empty|no_today|stale:*) NEED_FB=1 ;;
+          esac
 
-          # 3) fallback to yfinance if tickers file exists
+          # 3) yfinance フォールバック（当日データのみ）
           if [ "${NEED_FB}" -eq 1 ]; then
             if [ -f tickers_scoinp.txt ]; then
               echo "Fallback: yfinance (today-only strict)"
@@ -160,12 +169,11 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate intraday snapshot (with legacy fallback)
+      - name: Generate intraday snapshot (ext CLI -> legacy fallback)
         run: |
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
 
-          echo "Try: extended CLI"
           set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -176,13 +184,12 @@ jobs:
             --session-start 09:00 \
             --session-end 15:30 \
             --day-anchor 09:00 \
-            --basis prev_close \
+            --basis "${BASIS_DEFAULT}" \
             --label "${LABEL}" \
             --dt-col "${DT_COL}" \
-            --value-type auto
+            --value-type "${VALUE_TYPE_DEFAULT}"
           rc=$?
           set -e
-
           if [ $rc -ne 0 ]; then
             echo "[fallback] legacy CLI"
             python scripts/make_intraday_post.py \
@@ -197,7 +204,27 @@ jobs:
               --basis prev_close
           fi
 
-          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
+      - name: Validate outputs (existence / size / freshness)
+        run: |
+          set -e
+          # 存在
+          test -f "${OUT_JSON}" || (echo "::error::missing ${OUT_JSON}" && exit 1)
+          test -f "${OUT_TEXT}" || (echo "::error::missing ${OUT_TEXT}" && exit 1)
+          if   [ -f "${SNAPSHOT_PNG}" ]; then SNAP="${SNAPSHOT_PNG}"
+          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then SNAP="${SNAPSHOT_AM_PNG}"
+          else echo "::error::snapshot not found"; exit 1; fi
+
+          # サイズ（1KB 未満の “No data” 画像を撥ねる）
+          [ $(stat -c%s "${SNAP}") -ge 1024 ] || { echo "::error file=${SNAP}::snapshot too small"; exit 1; }
+          [ $(stat -c%s "${OUT_TEXT}") -ge 30 ] || { echo "::error file=${OUT_TEXT}::text too small"; exit 1; }
+
+          # JSON 更新確認（1時間以内の更新が目安）
+          now=$(date +%s)
+          mtime=$(date -r "${OUT_JSON}" +%s)
+          diff=$(( now - mtime ))
+          if [ $diff -gt 3600 ]; then
+            echo "::warning::stats.json looks stale (${diff}s old)"
+          fi
 
       - name: Checkout site repo
         uses: actions/checkout@v4
