@@ -3,14 +3,14 @@ name: Generate long-term charts (S-COIN+ 7d/1m/1y + stats)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '15 1 * * *'   # 毎日 10:15 JST (UTCに換算)
+    - cron: '15 1 * * *'   # 毎日 10:15 JST (UTC 換算)
 
 permissions:
   contents: write
 
 concurrency:
   group: long-charts-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -41,7 +41,7 @@ jobs:
           pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install pandas matplotlib; fi
 
-      # （任意）過去のファイル名の揺れを矯正
+      # 旧ファイル名を標準化（任意だが事故防止）
       - name: Normalize legacy filenames
         shell: bash
         run: |
@@ -56,21 +56,40 @@ jobs:
 
       - name: Generate long charts (7d/1m/1y)
         run: |
+          set -e
           python scripts/long_charts.py
           ls -lah "$OUT_DIR" || true
 
-      - name: Commit charts if changed
+      - name: Validate and commit (avoid 'No data' overwrite)
         shell: bash
         run: |
+          set -e
+          ok=1
+          for f in "$OUT_DIR/${INDEX_KEY}_7d.png" "$OUT_DIR/${INDEX_KEY}_1m.png" "$OUT_DIR/${INDEX_KEY}_1y.png"; do
+            if [ ! -f "$f" ]; then echo "::error::missing $f"; ok=0; continue; fi
+            if [ $(stat -c%s "$f") -lt 1024 ]; then echo "::error::too small $f"; ok=0; fi
+          done
+          # stats
+          if ls "$OUT_DIR"/*_stats.json >/dev/null 2>&1; then
+            :
+          else
+            echo "::warning::no stats json produced"
+          fi
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config --global safe.directory "$(pwd)"
-          # 1d は含めない
-          git add "$OUT_DIR/${INDEX_KEY}_{7d,1m,1y}.png" 2>/dev/null || true
-          git add "$OUT_DIR"/*_stats.json 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No changes"
+
+          if [ $ok -eq 1 ]; then
+            git add "$OUT_DIR/${INDEX_KEY}_{7d,1m,1y}.png" 2>/dev/null || true
+            git add "$OUT_DIR"/*_stats.json 2>/dev/null || true
+            if git diff --cached --quiet; then
+              echo "No changes"
+            else
+              git commit -m "chore(scoin_plus): update long-term charts (7d/1m/1y) + stats"
+              git push
+            fi
           else
-            git commit -m "chore(scoin_plus): update long-term charts (7d/1m/1y) + stats"
-            git push
+            echo "::error::long-term outputs invalid; skip commit"
+            exit 1
           fi
