@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 依存を確実インストール（no-cache）
+      # 依存を確実に入れる（キャッシュ非使用）＋ 明示チェック
       - name: Install deps
         shell: bash
         run: |
@@ -54,14 +54,18 @@ jobs:
           python -V
           python -m pip install -U --no-cache-dir pip
           python -m pip install -U --no-cache-dir pandas matplotlib pytz yfinance
-          # 依存存在の簡易チェック（heredocを避ける）
-          python -c "import importlib, sys; \
-missing=[m for m in ('pandas','matplotlib','pytz','yfinance') \
-if importlib.util.find_spec(m) is None]; \
-print('deps-ok' if not missing else f'FATAL missing: {missing}') ; \
-sys.exit(0 if not missing else 1)"
+          cat > _deps_check.py <<'PY'
+import importlib, sys
+need = ("pandas","matplotlib","pytz","yfinance")
+missing = [m for m in need if importlib.util.find_spec(m) is None]
+if missing:
+    print("FATAL missing:", missing)
+    sys.exit(1)
+print("deps-ok")
+PY
+          python _deps_check.py
 
-      # 市場時間外ならスキップ
+      # 市場時間外ならスキップ（JST）
       - name: Skip when market closed (JST)
         shell: bash
         run: |
@@ -71,13 +75,14 @@ sys.exit(0 if not missing else 1)"
             exit 0
           fi
 
+      # intraday CSV 作成（自前スクリプト優先 → yfinance フォールバック）
       - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p docs/outputs
 
-          # 1) repoスクリプト優先
+          # 1) repo スクリプト優先
           if [ -f src/scoin_plus_intraday.py ]; then
             echo "Using src/scoin_plus_intraday.py"
             python src/scoin_plus_intraday.py \
@@ -85,8 +90,8 @@ sys.exit(0 if not missing else 1)"
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) CSVの内容をチェック（今日の行があり最新か）
-          cat > _chk.py <<'PY'
+          # 2) 今日データの有無/鮮度チェック
+          cat > _chk_csv.py <<'PY'
 from datetime import datetime, timedelta, timezone
 import pandas as pd, os
 P='docs/outputs/scoin_plus_intraday.csv'
@@ -118,7 +123,7 @@ def check():
     return "ok"
 print(check())
 PY
-          STATUS=$(python _chk.py || true)
+          STATUS=$(python _chk_csv.py || true)
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
@@ -126,10 +131,10 @@ PY
             NEED_FB=1
           fi
 
-          # 3) fallback: yfinance（tickers があれば）
+          # 3) フォールバック: yfinance（tickers_scoinp.txt がある場合のみ）
           if [ "${NEED_FB}" -eq 1 ]; then
             if [ -f tickers_scoinp.txt ]; then
-              echo "Fallback: yfinance (today-only strict)"
+              echo "Fallback to yfinance (today-only)"
               cat > build_csv.py <<'PY'
 import sys, pandas as pd, datetime as dt, os
 import pytz, yfinance as yf
@@ -159,8 +164,8 @@ if not frames:
     print('NO_TODAY_DATA'); sys.exit(2)
 px=pd.concat(frames, axis=1).sort_index().dropna(how='all')
 px['Datetime']=px.index
-idx_cols=[c for c in px.columns if c in tickers]
-px['Index']=px[idx_cols].mean(axis=1, skipna=True)
+cols=[c for c in px.columns if c in tickers]
+px['Index']=px[cols].mean(axis=1, skipna=True)
 px[['Datetime','Index']].to_csv(csv_path, index=False)
 print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())
 PY
@@ -194,6 +199,7 @@ PY
           set -euo pipefail
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
+
           echo "Try: extended CLI"
           set +e
           python scripts/make_intraday_post.py \
@@ -205,6 +211,7 @@ PY
             --session-start 09:00 --session-end 15:30 --day-anchor 09:00 \
             --basis prev_close --label "${LABEL}" --dt-col "${DT_COL}" --value-type auto
           rc=$?; set -e
+
           if [ $rc -ne 0 ]; then
             echo "[fallback] legacy CLI"
             python scripts/make_intraday_post.py \
