@@ -46,28 +46,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 依存は必ず先に入れる（no-cache / 再試行つき）
+      # 依存を確実インストール（no-cache）
       - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
           python -V
           python -m pip install -U --no-cache-dir pip
-          for pkg in pandas matplotlib yfinance pytz; do
-            python -m pip install -U --no-cache-dir "$pkg" || python -m pip install -U "$pkg"
-          done
-          python - <<'PY'
-import importlib, sys
-for m in ("pandas","matplotlib","pytz","yfinance"):
-    try:
-        importlib.import_module(m)
-    except Exception as e:
-        print("FATAL: dependency missing:", m, e)
-        sys.exit(1)
-print("deps-ok")
-PY
+          python -m pip install -U --no-cache-dir pandas matplotlib pytz yfinance
+          # 依存存在の簡易チェック（heredocを避ける）
+          python -c "import importlib, sys; \
+missing=[m for m in ('pandas','matplotlib','pytz','yfinance') \
+if importlib.util.find_spec(m) is None]; \
+print('deps-ok' if not missing else f'FATAL missing: {missing}') ; \
+sys.exit(0 if not missing else 1)"
 
-      # 市場時間外ならここで終了
+      # 市場時間外ならスキップ
       - name: Skip when market closed (JST)
         shell: bash
         run: |
@@ -91,8 +85,8 @@ PY
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) CSVの内容をチェック（きょうの行があり最新か）
-          python - <<'PY' > _chk_status.txt || true
+          # 2) CSVの内容をチェック（今日の行があり最新か）
+          cat > _chk.py <<'PY'
 from datetime import datetime, timedelta, timezone
 import pandas as pd, os
 P='docs/outputs/scoin_plus_intraday.csv'
@@ -124,7 +118,7 @@ def check():
     return "ok"
 print(check())
 PY
-          STATUS=$(cat _chk_status.txt || echo missing)
+          STATUS=$(python _chk.py || true)
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
@@ -132,13 +126,11 @@ PY
             NEED_FB=1
           fi
 
-          # 3) fallback: yfinance（なければその場で入れてから実行）
+          # 3) fallback: yfinance（tickers があれば）
           if [ "${NEED_FB}" -eq 1 ]; then
-            echo "Fallback: yfinance (today-only strict)"
-            python - <<'PY' || true
-import importlib; importlib.import_module("yfinance")
-PY
-            python - <<'PY' > build_csv.py
+            if [ -f tickers_scoinp.txt ]; then
+              echo "Fallback: yfinance (today-only strict)"
+              cat > build_csv.py <<'PY'
 import sys, pandas as pd, datetime as dt, os
 import pytz, yfinance as yf
 csv_path='docs/outputs/scoin_plus_intraday.csv'
@@ -172,7 +164,10 @@ px['Index']=px[idx_cols].mean(axis=1, skipna=True)
 px[['Datetime','Index']].to_csv(csv_path, index=False)
 print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())
 PY
-            python build_csv.py
+              python build_csv.py
+            else
+              echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback."
+            fi
           fi
 
       - name: Verify inputs & script
