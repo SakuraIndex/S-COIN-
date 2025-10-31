@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 依存関係は必ず先に入れる（no-cache / 再試行つき）
+      # 依存は必ず先に入れる（no-cache / 再試行つき）
       - name: Install deps
         shell: bash
         run: |
@@ -67,7 +67,7 @@ for m in ("pandas","matplotlib","pytz","yfinance"):
 print("deps-ok")
 PY
 
-      # ※ 市場時間外ならここで終了（Install後に実行することで依存不足の誤検知を避ける）
+      # 市場時間外ならここで終了
       - name: Skip when market closed (JST)
         shell: bash
         run: |
@@ -92,59 +92,39 @@ PY
           fi
 
           # 2) CSVの内容をチェック（きょうの行があり最新か）
-          python - <<'PY' || true
-from datetime import datetime, timezone, timedelta
-import pandas as pd, sys, zoneinfo, os
-p = 'docs/outputs/scoin_plus_intraday.csv'
-jst = zoneinfo.ZoneInfo("Asia/Tokyo")
+          python - <<'PY' > _chk_status.txt || true
+from datetime import datetime, timedelta, timezone
+import pandas as pd, os
+P='docs/outputs/scoin_plus_intraday.csv'
+try:
+    import zoneinfo
+    JST=zoneinfo.ZoneInfo("Asia/Tokyo")
+except Exception:
+    from pytz import timezone as _tz
+    JST=_tz("Asia/Tokyo")
 def check():
-    if not os.path.exists(p): return "missing"
+    if not os.path.exists(P): return "missing"
     try:
-        df = pd.read_csv(p, parse_dates=['Datetime'])
+        df=pd.read_csv(P, parse_dates=["Datetime"])
     except Exception:
         return "empty"
     if df.empty: return "empty"
     try:
-        if df['Datetime'].dt.tz is None:
-            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')
-        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')
+        if df["Datetime"].dt.tz is None:
+            df["Datetime"]=df["Datetime"].dt.tz_localize("Asia/Tokyo", nonexistent="NaT", ambiguous="NaT")
+        df["Datetime"]=df["Datetime"].dt.tz_convert("Asia/Tokyo")
     except Exception:
         pass
-    today = datetime.now(jst).date()
-    df = df[df['Datetime'].dt.date == today]
+    today=datetime.now(JST).date()
+    df=df[df["Datetime"].dt.date==today]
     if df.empty: return "no_today"
-    last = df['Datetime'].max().to_pydatetime().astimezone(jst)
-    if (datetime.now(jst) - last).total_seconds() > 90*60: return f"stale:{last.isoformat()}"
+    last=df["Datetime"].max().to_pydatetime().astimezone(JST)
+    if (datetime.now(JST)-last).total_seconds()>90*60:
+        return f"stale:{last.isoformat()}"
     return "ok"
 print(check())
 PY
-          STATUS=$(python - <<'PY'
-from datetime import datetime, timezone, timedelta
-import pandas as pd, sys, zoneinfo, os
-p = 'docs/outputs/scoin_plus_intraday.csv'
-jst = zoneinfo.ZoneInfo("Asia/Tokyo")
-def check():
-    if not os.path.exists(p): return "missing"
-    try:
-        df = pd.read_csv(p, parse_dates=['Datetime'])
-    except Exception:
-        return "empty"
-    if df.empty: return "empty"
-    try:
-        if df['Datetime'].dt.tz is None:
-            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')
-        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')
-    except Exception:
-        pass
-    today = datetime.now(jst).date()
-    df = df[df['Datetime'].dt.date == today]
-    if df.empty: return "no_today"
-    last = df['Datetime'].max().to_pydatetime().astimezone(jst)
-    if (datetime.now(jst) - last).total_seconds() > 90*60: return f"stale:{last.isoformat()}"
-    return "ok"
-print(check())
-PY
-)
+          STATUS=$(cat _chk_status.txt || echo missing)
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
@@ -155,39 +135,40 @@ PY
           # 3) fallback: yfinance（なければその場で入れてから実行）
           if [ "${NEED_FB}" -eq 1 ]; then
             echo "Fallback: yfinance (today-only strict)"
-            python - <<'PY' || (python -m pip install -U --no-cache-dir yfinance && python build_csv.py)
-import sys, importlib
-importlib.import_module("yfinance")
+            python - <<'PY' || true
+import importlib; importlib.import_module("yfinance")
 PY
-            cat > build_csv.py <<'PY'
-import sys, pandas as pd, datetime as dt, pytz, yfinance as yf, os
-csv_path = 'docs/outputs/scoin_plus_intraday.csv'
-tickers = []
+            python - <<'PY' > build_csv.py
+import sys, pandas as pd, datetime as dt, os
+import pytz, yfinance as yf
+csv_path='docs/outputs/scoin_plus_intraday.csv'
+tickers=[]
 if os.path.exists('tickers_scoinp.txt'):
     with open('tickers_scoinp.txt') as f:
-        tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]
+        tickers=[t.strip() for t in f if t.strip() and not t.startswith('#')]
 if not tickers:
-    print("NO_TICKERS"); sys.exit(2)
-jst = pytz.timezone('Asia/Tokyo')
-today = dt.datetime.now(jst).date()
-frames = []
+    print('NO_TICKERS'); sys.exit(2)
+jst=pytz.timezone('Asia/Tokyo')
+today=dt.datetime.now(jst).date()
+frames=[]
 for t in tickers:
     try:
-        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)
+        df=yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)
     except Exception as e:
         print('download failed', t, e); continue
     if df is None or df.empty: continue
-    if df.index.tz is None: df.index = df.index.tz_localize('UTC')
-    df = df.tz_convert(jst)
-    df = df[df.index.date == today]
+    if df.index.tz is None: df.index=df.index.tz_localize('UTC')
+    df=df.tz_convert(jst)
+    df=df[df.index.date==today]
     if df.empty: continue
-    df = df[['Close']].rename(columns={'Close': t})
+    df=df[['Close']].rename(columns={'Close':t})
     frames.append(df)
 if not frames:
     print('NO_TODAY_DATA'); sys.exit(2)
-px = pd.concat(frames, axis=1).sort_index().dropna(how='all')
-px['Datetime'] = px.index
-px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)
+px=pd.concat(frames, axis=1).sort_index().dropna(how='all')
+px['Datetime']=px.index
+idx_cols=[c for c in px.columns if c in tickers]
+px['Index']=px[idx_cols].mean(axis=1, skipna=True)
 px[['Datetime','Index']].to_csv(csv_path, index=False)
 print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())
 PY
