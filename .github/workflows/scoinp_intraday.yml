@@ -46,7 +46,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 依存を確実に入れる（キャッシュ使わず）＋ 未インストールなら python から pip 実行
       - name: Ensure deps (pandas/matplotlib/pytz/yfinance)
         shell: bash
         run: |
@@ -63,7 +62,6 @@ jobs:
           print("deps-ok")
           PY
 
-      # 市場時間外ならスキップ（JST）
       - name: Skip when market closed (JST)
         shell: bash
         run: |
@@ -73,7 +71,6 @@ jobs:
             exit 0
           fi
 
-      # intraday CSV 作成（自前スクリプト優先 → yfinance フォールバック）
       - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
         shell: bash
         run: |
@@ -88,17 +85,17 @@ jobs:
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) 今日データの有無/鮮度チェック
-          STATUS=$(python - <<'PY' || true)
+          # 2) 今日データの有無/鮮度チェック（heredoc→ファイル→python実行に変更）
+          cat > _chk.py <<'PY'
           from datetime import datetime, timezone, timedelta
           import pandas as pd, os
-          P='docs/outputs/scoin_plus_intraday.csv'
           try:
               import zoneinfo
               JST=zoneinfo.ZoneInfo("Asia/Tokyo")
           except Exception:
               from pytz import timezone as _tz
               JST=_tz("Asia/Tokyo")
+          P='docs/outputs/scoin_plus_intraday.csv'
           def check():
               if not os.path.exists(P): return "missing"
               try:
@@ -121,6 +118,7 @@ jobs:
               return "ok"
           print(check())
           PY
+          STATUS=$(python _chk.py || true)
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
@@ -132,7 +130,7 @@ jobs:
           if [ "${NEED_FB}" -eq 1 ]; then
             if [ -f tickers_scoinp.txt ]; then
               echo "Fallback to yfinance (today-only)"
-              python - <<'PY'
+              cat > build_csv.py <<'PY'
               import sys, pandas as pd, datetime as dt, os
               import pytz, yfinance as yf
               csv_path='docs/outputs/scoin_plus_intraday.csv'
@@ -166,6 +164,7 @@ jobs:
               px[['Datetime','Index']].to_csv(csv_path, index=False)
               print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())
               PY
+              python build_csv.py
             else
               echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback."
             fi
