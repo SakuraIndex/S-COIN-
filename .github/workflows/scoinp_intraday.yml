@@ -16,10 +16,9 @@ concurrency:
 env:
   INDEX_KEY: S_COIN_PLUS
   LABEL: "S-COIN+"
+
   CSV: docs/outputs/scoin_plus_intraday.csv
   DT_COL: "Datetime"
-  BASIS_DEFAULT: prev_close
-  VALUE_TYPE_DEFAULT: auto
 
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
@@ -48,15 +47,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Ensure deps (pandas/matplotlib/pytz/yfinance)
+      - name: Install deps
         shell: bash
         run: |
           set -euo pipefail
-          python -V
           python -m pip install -U pip
-          for pkg in pandas matplotlib pytz yfinance; do
-            python -m pip install -U --no-cache-dir "$pkg" || python -m pip install -U "$pkg"
-          done
+          # yfinance まで入れておく（将来のフォールバック用）
+          python -m pip install -U --no-cache-dir pandas matplotlib pytz yfinance
 
       - name: Skip when market closed (JST)
         shell: bash
@@ -67,134 +64,19 @@ jobs:
             exit 0
           fi
 
-      - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
+      - name: Build intraday CSV via repo script
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p docs/outputs
-
-          echo "== Try repo script =="
           if [ -f src/scoin_plus_intraday.py ]; then
             python src/scoin_plus_intraday.py \
               --out "${CSV}" \
-              --start "09:00" --end "15:30" || true
+              --start "09:00" --end "15:30"
+          else
+            echo "src/scoin_plus_intraday.py not found"; exit 1
           fi
-
-          echo "== Freshness check =="
-          export P="${CSV}"
-          STATUS=$(python -c '
-import os, sys, pandas as pd
-from datetime import datetime, timedelta
-# TZ 準備
-try:
-    from zoneinfo import ZoneInfo
-    JST = ZoneInfo("Asia/Tokyo")
-except Exception:
-    import pytz
-    JST = pytz.timezone("Asia/Tokyo")
-
-p = os.environ.get("P","")
-if not p or not os.path.exists(p):
-    print("missing"); sys.exit(0)
-
-try:
-    df = pd.read_csv(p, parse_dates=["Datetime"])
-except Exception:
-    print("empty"); sys.exit(0)
-
-if df.empty:
-    print("empty"); sys.exit(0)
-
-try:
-    if df["Datetime"].dt.tz is None:
-        df["Datetime"] = df["Datetime"].dt.tz_localize("Asia/Tokyo", nonexistent="NaT", ambiguous="NaT")
-    df["Datetime"] = df["Datetime"].dt.tz_convert("Asia/Tokyo")
-except Exception:
-    pass
-
-today = datetime.now(JST).date()
-df = df[df["Datetime"].dt.date == today]
-if df.empty:
-    print("no_today"); sys.exit(0)
-
-last = df["Datetime"].max().to_pydatetime()
-try:
-    last = last.astimezone(JST)
-except Exception:
-    pass
-
-delta = (datetime.now(JST) - last).total_seconds()
-print("ok" if delta <= 5400 else "stale")
-' )
-          echo "CHECK_CSV_STATUS: ${STATUS}"
-
-          if [ "${STATUS}" != "ok" ] && [ -f tickers_scoinp.txt ]; then
-            echo "== yfinance fallback =="
-            export P="${CSV}"
-            python -c '
-import os, sys, pandas as pd, datetime as dt
-# yfinance が未導入でもここまで来る想定はないが一応
-try:
-    import yfinance as yf
-except Exception as e:
-    print("NO_YF", e); sys.exit(2)
-
-# TZ
-try:
-    from zoneinfo import ZoneInfo
-    JST = ZoneInfo("Asia/Tokyo")
-except Exception:
-    import pytz
-    JST = pytz.timezone("Asia/Tokyo")
-
-csv_path = os.environ.get("P","docs/outputs/scoin_plus_intraday.csv")
-if not os.path.exists("tickers_scoinp.txt"):
-    print("NO_TICKERS"); sys.exit(2)
-tickers = [t.strip() for t in open("tickers_scoinp.txt") if t.strip() and not t.startswith("#")]
-if not tickers:
-    print("NO_TICKERS"); sys.exit(2)
-
-today = dt.datetime.now(JST).date()
-frames = []
-for t in tickers:
-    try:
-        df = yf.download(t, period="5d", interval="1m", prepost=False, auto_adjust=True, threads=False)
-    except Exception as e:
-        print("download failed", t, e); continue
-    if df is None or df.empty: continue
-    if df.index.tz is None:
-        try:
-            import pytz
-            df.index = df.index.tz_localize(pytz.UTC)
-        except Exception:
-            pass
-    try:
-        df = df.tz_convert(JST)
-    except Exception:
-        pass
-    df = df[df.index.date == today]
-    if df.empty: continue
-    df = df[["Close"]].rename(columns={"Close": t})
-    frames.append(df)
-
-if not frames:
-    print("NO_TODAY_DATA"); sys.exit(2)
-
-px = pd.concat(frames, axis=1).sort_index().dropna(how="all")
-px["Datetime"] = px.index
-cols = [c for c in px.columns if c in tickers]
-px["Index"] = px[cols].mean(axis=1, skipna=True)
-px[["Datetime","Index"]].to_csv(csv_path, index=False)
-print("CSV written:", csv_path, "rows=", len(px))
-'
-          fi
-
-      - name: Verify inputs & script
-        shell: bash
-        run: |
-          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
-          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
-          mkdir -p "${OUT_DIR}"
+          test -s "${CSV}"
 
       - name: Decide AM/PM variant
         env:
@@ -206,15 +88,14 @@ print("CSV written:", csv_path, "rows=", len(px))
           else
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
-          echo "Variant=${PUBLISH_VARIANT:-pm}"
 
-      - name: Generate intraday snapshot (extended CLI -> legacy fallback)
+      - name: Generate intraday snapshot
         shell: bash
         run: |
+          set -euo pipefail
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
 
-          set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -224,38 +105,16 @@ print("CSV written:", csv_path, "rows=", len(px))
             --session-start 09:00 \
             --session-end 15:30 \
             --day-anchor 09:00 \
-            --basis "${BASIS_DEFAULT}" \
+            --basis prev_close \
             --label "${LABEL}" \
             --dt-col "${DT_COL}" \
-            --value-type "${VALUE_TYPE_DEFAULT}"
-          rc=$?
-          set -e
+            --value-type auto
 
-          if [ $rc -ne 0 ]; then
-            echo "[fallback] legacy CLI"
-            python scripts/make_intraday_post.py \
-              --index-key "${INDEX_KEY}" \
-              --csv "${CSV}" \
-              --out-json "${OUT_JSON}" \
-              --out-text "${OUT_TEXT}" \
-              --snapshot-png "${SNAP}" \
-              --session-start 09:00 \
-              --session-end 15:30 \
-              --day-anchor 09:00 \
-              --basis "${BASIS_DEFAULT}"
-          fi
-
-          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
-
-      - name: Validate outputs (existence/size)
-        shell: bash
-        run: |
-          SNAP="${SNAPSHOT_PNG}"
-          [ "${PUBLISH_VARIANT:-pm}" = "am" ] && SNAP="${SNAPSHOT_AM_PNG}"
+          # 最低限の存在・サイズチェック
           test -s "${OUT_JSON}"
           test -s "${OUT_TEXT}"
           test -s "${SNAP}"
-          [ $(stat -c%s "${SNAP}") -ge 8192 ]
+          [ $(stat -c%s "${SNAP}") -ge 8192 ] || { echo "snapshot too small"; exit 1; }
 
       - name: Checkout site repo
         uses: actions/checkout@v4
@@ -269,10 +128,13 @@ print("CSV written:", csv_path, "rows=", len(px))
       - name: Copy into site tree
         shell: bash
         run: |
+          set -euo pipefail
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
+
           SNAP="${SNAPSHOT_PNG}"
-          [ "${PUBLISH_VARIANT:-pm}" = "am" ] && SNAP="${SNAPSHOT_AM_PNG}"
+          if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
+
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
           cp -f "${SNAP}"      "${dst}/intraday.png"
