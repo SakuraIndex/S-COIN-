@@ -15,10 +15,8 @@ concurrency:
 
 env:
   INDEX_KEY: S_COIN_PLUS
-  LABEL: "S-COIN+"
-
+  LABEL: "S-COIN+"            # ← 使わないが残しても害なし
   CSV: docs/outputs/scoin_plus_intraday.csv
-  DT_COL: "Datetime"
 
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
@@ -52,7 +50,6 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -U pip
-          # yfinance まで入れておく（将来のフォールバック用）
           python -m pip install -U --no-cache-dir pandas matplotlib pytz yfinance
 
       - name: Skip when market closed (JST)
@@ -69,13 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p docs/outputs
-          if [ -f src/scoin_plus_intraday.py ]; then
-            python src/scoin_plus_intraday.py \
-              --out "${CSV}" \
-              --start "09:00" --end "15:30"
-          else
-            echo "src/scoin_plus_intraday.py not found"; exit 1
-          fi
+          python src/scoin_plus_intraday.py --out "${CSV}" --start "09:00" --end "15:30"
           test -s "${CSV}"
 
       - name: Decide AM/PM variant
@@ -89,6 +80,7 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
+      # ★ 引数をサポートされているものだけに修正
       - name: Generate intraday snapshot
         shell: bash
         run: |
@@ -105,12 +97,8 @@ jobs:
             --session-start 09:00 \
             --session-end 15:30 \
             --day-anchor 09:00 \
-            --basis prev_close \
-            --label "${LABEL}" \
-            --dt-col "${DT_COL}" \
-            --value-type auto
+            --basis prev_close
 
-          # 最低限の存在・サイズチェック
           test -s "${OUT_JSON}"
           test -s "${OUT_TEXT}"
           test -s "${SNAP}"
@@ -131,10 +119,8 @@ jobs:
           set -euo pipefail
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
-
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
-
           cp -f "${OUT_JSON}" "${dst}/stats.json"
           cp -f "${OUT_TEXT}" "${dst}/post_intraday.txt"
           cp -f "${SNAP}"      "${dst}/intraday.png"
