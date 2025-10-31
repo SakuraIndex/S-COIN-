@@ -64,8 +64,7 @@ jobs:
             exit 0
           fi
 
-      # CSV を作る（自前スクリプト優先 → 鮮度チェック → 必要なら yfinance フォールバック）
-      - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
+        - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
         shell: bash
         run: |
           set -euo pipefail
@@ -77,7 +76,7 @@ jobs:
           fi
 
           echo "=== STEP2: freshness check ==="
-          cat > _chk.py << 'PY'
+          cat > _chk.py <<'EOF'
 from datetime import datetime, timedelta, timezone
 import os, sys
 import pandas as pd
@@ -118,7 +117,8 @@ if (datetime.now(JST) - last).total_seconds() > 5400:
 
 print('CHECK_CSV_STATUS: ok')
 sys.exit(0)
-PY
+EOF
+
           if python _chk.py; then
             NEED_FB=0
           else
@@ -128,7 +128,7 @@ PY
 
           if [ "${NEED_FB}" -eq 1 ] && [ -f tickers_scoinp.txt ]; then
             echo "=== STEP3: yfinance fallback ==="
-            cat > build_csv.py << 'PY'
+            cat > build_csv.py <<'EOF'
 import os, sys, pandas as pd, datetime as dt, pytz, yfinance as yf
 csv_path='docs/outputs/scoin_plus_intraday.csv'
 tickers=[t.strip() for t in open('tickers_scoinp.txt') if t.strip() and not t.startswith('#')] if os.path.exists('tickers_scoinp.txt') else []
@@ -157,7 +157,7 @@ cols=[c for c in px.columns if c in tickers]
 px['Index']=px[cols].mean(axis=1, skipna=True)
 px[['Datetime','Index']].to_csv(csv_path, index=False)
 print('CSV written:', csv_path, 'rows=', len(px))
-PY
+EOF
             python build_csv.py
           fi
 
