@@ -54,7 +54,6 @@ jobs:
           set -euo pipefail
           python -V
           python -m pip install -U pip
-          # 失敗しても即死しないように再試行（軽い保険）
           for pkg in pandas matplotlib pytz yfinance; do
             python -m pip install -U --no-cache-dir "$pkg" || python -m pip install -U "$pkg"
           done
@@ -74,95 +73,120 @@ jobs:
           set -euo pipefail
           mkdir -p docs/outputs
 
-          echo "=== STEP1: repo script (optional) ==="
+          echo "== Try repo script =="
           if [ -f src/scoin_plus_intraday.py ]; then
-            python src/scoin_plus_intraday.py --out "${CSV}" --start "09:00" --end "15:30" || true
+            python src/scoin_plus_intraday.py \
+              --out "${CSV}" \
+              --start "09:00" --end "15:30" || true
           fi
 
-          echo "=== STEP2: freshness check ==="
-          cat > _chk.py <<'PY'
-from datetime import datetime, timedelta, timezone
-import os, sys
-import pandas as pd
+          echo "== Freshness check =="
+          export P="${CSV}"
+          STATUS=$(python -c '
+import os, sys, pandas as pd
+from datetime import datetime, timedelta
+# TZ 準備
 try:
     from zoneinfo import ZoneInfo
-    JST = ZoneInfo('Asia/Tokyo')
+    JST = ZoneInfo("Asia/Tokyo")
 except Exception:
-    from pytz import timezone as _tz
-    JST = _tz('Asia/Tokyo')
+    import pytz
+    JST = pytz.timezone("Asia/Tokyo")
 
-P='docs/outputs/scoin_plus_intraday.csv'
-if not os.path.exists(P):
-    print('CHECK_CSV_STATUS: missing'); sys.exit(2)
+p = os.environ.get("P","")
+if not p or not os.path.exists(p):
+    print("missing"); sys.exit(0)
 
 try:
-    df = pd.read_csv(P, parse_dates=['Datetime'])
+    df = pd.read_csv(p, parse_dates=["Datetime"])
 except Exception:
-    print('CHECK_CSV_STATUS: empty'); sys.exit(2)
+    print("empty"); sys.exit(0)
 
 if df.empty:
-    print('CHECK_CSV_STATUS: empty'); sys.exit(2)
+    print("empty"); sys.exit(0)
 
 try:
-    if df['Datetime'].dt.tz is None:
-        df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')
-    df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')
+    if df["Datetime"].dt.tz is None:
+        df["Datetime"] = df["Datetime"].dt.tz_localize("Asia/Tokyo", nonexistent="NaT", ambiguous="NaT")
+    df["Datetime"] = df["Datetime"].dt.tz_convert("Asia/Tokyo")
 except Exception:
     pass
 
 today = datetime.now(JST).date()
-df = df[df['Datetime'].dt.date == today]
+df = df[df["Datetime"].dt.date == today]
 if df.empty:
-    print('CHECK_CSV_STATUS: no_today'); sys.exit(2)
+    print("no_today"); sys.exit(0)
 
-last = df['Datetime'].max().to_pydatetime().astimezone(JST)
-if (datetime.now(JST) - last).total_seconds() > 5400:
-    print(f'CHECK_CSV_STATUS: stale:{last.isoformat()}'); sys.exit(2)
+last = df["Datetime"].max().to_pydatetime()
+try:
+    last = last.astimezone(JST)
+except Exception:
+    pass
 
-print('CHECK_CSV_STATUS: ok')
-sys.exit(0)
-PY
+delta = (datetime.now(JST) - last).total_seconds()
+print("ok" if delta <= 5400 else "stale")
+' )
+          echo "CHECK_CSV_STATUS: ${STATUS}"
 
-          if python _chk.py; then
-            NEED_FB=0
-          else
-            NEED_FB=1
-          fi
-          echo "NEED_FB=${NEED_FB}"
+          if [ "${STATUS}" != "ok" ] && [ -f tickers_scoinp.txt ]; then
+            echo "== yfinance fallback =="
+            export P="${CSV}"
+            python -c '
+import os, sys, pandas as pd, datetime as dt
+# yfinance が未導入でもここまで来る想定はないが一応
+try:
+    import yfinance as yf
+except Exception as e:
+    print("NO_YF", e); sys.exit(2)
 
-          if [ "${NEED_FB}" -eq 1 ] && [ -f tickers_scoinp.txt ]; then
-            echo "=== STEP3: yfinance fallback ==="
-            cat > build_csv.py <<'PY'
-import os, sys, pandas as pd, datetime as dt, pytz, yfinance as yf
-csv_path='docs/outputs/scoin_plus_intraday.csv'
-tickers=[t.strip() for t in open('tickers_scoinp.txt') if t.strip() and not t.startswith('#')] if os.path.exists('tickers_scoinp.txt') else []
+# TZ
+try:
+    from zoneinfo import ZoneInfo
+    JST = ZoneInfo("Asia/Tokyo")
+except Exception:
+    import pytz
+    JST = pytz.timezone("Asia/Tokyo")
+
+csv_path = os.environ.get("P","docs/outputs/scoin_plus_intraday.csv")
+if not os.path.exists("tickers_scoinp.txt"):
+    print("NO_TICKERS"); sys.exit(2)
+tickers = [t.strip() for t in open("tickers_scoinp.txt") if t.strip() and not t.startswith("#")]
 if not tickers:
-    print('NO_TICKERS'); sys.exit(2)
-jst=pytz.timezone('Asia/Tokyo')
-today=dt.datetime.now(jst).date()
-frames=[]
+    print("NO_TICKERS"); sys.exit(2)
+
+today = dt.datetime.now(JST).date()
+frames = []
 for t in tickers:
     try:
-        df=yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)
+        df = yf.download(t, period="5d", interval="1m", prepost=False, auto_adjust=True, threads=False)
     except Exception as e:
-        print('download failed', t, e); continue
+        print("download failed", t, e); continue
     if df is None or df.empty: continue
-    if df.index.tz is None: df.index=df.index.tz_localize('UTC')
-    df=df.tz_convert(jst)
-    df=df[df.index.date==today]
+    if df.index.tz is None:
+        try:
+            import pytz
+            df.index = df.index.tz_localize(pytz.UTC)
+        except Exception:
+            pass
+    try:
+        df = df.tz_convert(JST)
+    except Exception:
+        pass
+    df = df[df.index.date == today]
     if df.empty: continue
-    df=df[['Close']].rename(columns={'Close':t})
+    df = df[["Close"]].rename(columns={"Close": t})
     frames.append(df)
+
 if not frames:
-    print('NO_TODAY_DATA'); sys.exit(2)
-px=pd.concat(frames, axis=1).sort_index().dropna(how='all')
-px['Datetime']=px.index
-cols=[c for c in px.columns if c in tickers]
-px['Index']=px[cols].mean(axis=1, skipna=True)
-px[['Datetime','Index']].to_csv(csv_path, index=False)
-print('CSV written:', csv_path, 'rows=', len(px))
-PY
-            python build_csv.py
+    print("NO_TODAY_DATA"); sys.exit(2)
+
+px = pd.concat(frames, axis=1).sort_index().dropna(how="all")
+px["Datetime"] = px.index
+cols = [c for c in px.columns if c in tickers]
+px["Index"] = px[cols].mean(axis=1, skipna=True)
+px[["Datetime","Index"]].to_csv(csv_path, index=False)
+print("CSV written:", csv_path, "rows=", len(px))
+'
           fi
 
       - name: Verify inputs & script
@@ -231,7 +255,6 @@ PY
           test -s "${OUT_JSON}"
           test -s "${OUT_TEXT}"
           test -s "${SNAP}"
-          # サイズが小さすぎる＝空画像の早期検出（閾値は軽めに）
           [ $(stat -c%s "${SNAP}") -ge 8192 ]
 
       - name: Checkout site repo
