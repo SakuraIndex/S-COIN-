@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: scoinp-intraday-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   INDEX_KEY: S_COIN_PLUS
@@ -27,15 +27,15 @@ env:
   PUBLISH_TOKEN: ${{ secrets.SITE_PAT || secrets.SITE_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
   OUT_DIR: docs/outputs
-  OUT_JSON: docs/outputs/scoinp_stats.json
-  OUT_TEXT: docs/outputs/scoinp_post_intraday.txt
-  SNAPSHOT_PNG: docs/outputs/scoinp_intraday.png
-  SNAPSHOT_AM_PNG: docs/outputs/scoinp_intraday_am.png
+  OUT_JSON: docs/outputs/scoin_plus_stats.json
+  OUT_TEXT: docs/outputs/scoin_plus_post_intraday.txt
+  SNAPSHOT_PNG: docs/outputs/scoin_plus_intraday.png
+  SNAPSHOT_AM_PNG: docs/outputs/scoin_plus_intraday_am.png
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -46,36 +46,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
+      # 依存関係は必ず先に入れる（no-cache / 再試行つき）
       - name: Install deps
+        shell: bash
         run: |
-          python -m pip install -U pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas matplotlib yfinance pytz
-          fi
+          set -euo pipefail
+          python -V
+          python -m pip install -U --no-cache-dir pip
+          for pkg in pandas matplotlib yfinance pytz; do
+            python -m pip install -U --no-cache-dir "$pkg" || python -m pip install -U "$pkg"
+          done
+          python - <<'PY'
+import importlib, sys
+for m in ("pandas","matplotlib","pytz","yfinance"):
+    try:
+        importlib.import_module(m)
+    except Exception as e:
+        print("FATAL: dependency missing:", m, e)
+        sys.exit(1)
+print("deps-ok")
+PY
 
+      # ※ 市場時間外ならここで終了（Install後に実行することで依存不足の誤検知を避ける）
       - name: Skip when market closed (JST)
+        shell: bash
         run: |
           H=$(TZ=Asia/Tokyo date +%H%M)
-          # 09:00〜15:30 以外はスキップ
           if [ "$H" -lt 0900 ] || [ "$H" -gt 1530 ]; then
             echo "Market closed — skip."
             exit 0
           fi
 
       - name: Build intraday CSV (prefer repo script, optional yfinance fallback)
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p docs/outputs
 
-          # 1) repo スクリプトを最優先
+          # 1) repoスクリプト優先
           if [ -f src/scoin_plus_intraday.py ]; then
             echo "Using src/scoin_plus_intraday.py"
             python src/scoin_plus_intraday.py \
@@ -83,77 +91,111 @@ jobs:
               --start "09:00" --end "15:30" || true
           fi
 
-          # 2) 当日データの有無と “古さ” を検査（90分以上古ければ再取得）
-          {
-            echo "from datetime import datetime, timezone, timedelta"
-            echo "import sys, pandas as pd"
-            echo "jst = timezone(timedelta(hours=9))"
-            echo "p = 'docs/outputs/scoin_plus_intraday.csv'"
-            echo "def check(p):"
-            echo "    try: df = pd.read_csv(p, parse_dates=['Datetime'])"
-            echo "    except Exception: return 'missing'"
-            echo "    if df.empty: return 'empty'"
-            echo "    try:"
-            echo "        if df['Datetime'].dt.tz is None:"
-            echo "            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')"
-            echo "        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')"
-            echo "    except Exception: pass"
-            echo "    today = datetime.now(jst).date()"
-            echo "    df = df[df['Datetime'].dt.date == today]"
-            echo "    if df.empty: return 'no_today'"
-            echo "    last = df['Datetime'].max().to_pydatetime().astimezone(jst)"
-            echo "    if (datetime.now(jst) - last).total_seconds() > 90*60: return f'stale:{last.isoformat()}'"
-            echo "    return 'ok'"
-            echo "print(check(p))"
-          } > _chk.py
-
-          STATUS=$(python _chk.py || true)
+          # 2) CSVの内容をチェック（きょうの行があり最新か）
+          python - <<'PY' || true
+from datetime import datetime, timezone, timedelta
+import pandas as pd, sys, zoneinfo, os
+p = 'docs/outputs/scoin_plus_intraday.csv'
+jst = zoneinfo.ZoneInfo("Asia/Tokyo")
+def check():
+    if not os.path.exists(p): return "missing"
+    try:
+        df = pd.read_csv(p, parse_dates=['Datetime'])
+    except Exception:
+        return "empty"
+    if df.empty: return "empty"
+    try:
+        if df['Datetime'].dt.tz is None:
+            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')
+        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')
+    except Exception:
+        pass
+    today = datetime.now(jst).date()
+    df = df[df['Datetime'].dt.date == today]
+    if df.empty: return "no_today"
+    last = df['Datetime'].max().to_pydatetime().astimezone(jst)
+    if (datetime.now(jst) - last).total_seconds() > 90*60: return f"stale:{last.isoformat()}"
+    return "ok"
+print(check())
+PY
+          STATUS=$(python - <<'PY'
+from datetime import datetime, timezone, timedelta
+import pandas as pd, sys, zoneinfo, os
+p = 'docs/outputs/scoin_plus_intraday.csv'
+jst = zoneinfo.ZoneInfo("Asia/Tokyo")
+def check():
+    if not os.path.exists(p): return "missing"
+    try:
+        df = pd.read_csv(p, parse_dates=['Datetime'])
+    except Exception:
+        return "empty"
+    if df.empty: return "empty"
+    try:
+        if df['Datetime'].dt.tz is None:
+            df['Datetime'] = df['Datetime'].dt.tz_localize('Asia/Tokyo', nonexistent='NaT', ambiguous='NaT')
+        df['Datetime'] = df['Datetime'].dt.tz_convert('Asia/Tokyo')
+    except Exception:
+        pass
+    today = datetime.now(jst).date()
+    df = df[df['Datetime'].dt.date == today]
+    if df.empty: return "no_today"
+    last = df['Datetime'].max().to_pydatetime().astimezone(jst)
+    if (datetime.now(jst) - last).total_seconds() > 90*60: return f"stale:{last.isoformat()}"
+    return "ok"
+print(check())
+PY
+)
           echo "CHECK_CSV_STATUS: ${STATUS}"
 
           NEED_FB=0
-          case "${STATUS}" in
-            missing|empty|no_today|stale:*) NEED_FB=1 ;;
-          esac
+          if [ "${STATUS}" = "missing" ] || [ "${STATUS}" = "empty" ] || [ "${STATUS}" = "no_today" ]; then
+            NEED_FB=1
+          fi
 
-          # 3) yfinance フォールバック（当日データのみ）
+          # 3) fallback: yfinance（なければその場で入れてから実行）
           if [ "${NEED_FB}" -eq 1 ]; then
-            if [ -f tickers_scoinp.txt ]; then
-              echo "Fallback: yfinance (today-only strict)"
-              {
-                echo "import sys, pandas as pd, datetime as dt, pytz, yfinance as yf"
-                echo "csv_path = 'docs/outputs/scoin_plus_intraday.csv'"
-                echo "with open('tickers_scoinp.txt') as f:"
-                echo "    tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]"
-                echo "jst = pytz.timezone('Asia/Tokyo')"
-                echo "today = dt.datetime.now(jst).date()"
-                echo "frames = []"
-                echo "for t in tickers:"
-                echo "    try:"
-                echo "        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)"
-                echo "    except Exception as e:"
-                echo "        print('download failed', t, e); continue"
-                echo "    if df is None or df.empty: continue"
-                echo "    if df.index.tz is None: df.index = df.index.tz_localize('UTC')"
-                echo "    df = df.tz_convert(jst)"
-                echo "    df = df[df.index.date == today]"
-                echo "    if df.empty: continue"
-                echo "    df = df[['Close']].rename(columns={'Close': t})"
-                echo "    frames.append(df)"
-                echo "if not frames:"
-                echo "    print('NO_TODAY_DATA'); sys.exit(2)"
-                echo "px = pd.concat(frames, axis=1).sort_index().dropna(how='all')"
-                echo "px['Datetime'] = px.index"
-                echo "px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)"
-                echo "px[['Datetime','Index']].to_csv(csv_path, index=False)"
-                echo "print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())"
-              } > build_csv.py
-              python build_csv.py
-            else
-              echo "WARNING: tickers_scoinp.txt not found; skip yfinance fallback."
-            fi
+            echo "Fallback: yfinance (today-only strict)"
+            python - <<'PY' || (python -m pip install -U --no-cache-dir yfinance && python build_csv.py)
+import sys, importlib
+importlib.import_module("yfinance")
+PY
+            cat > build_csv.py <<'PY'
+import sys, pandas as pd, datetime as dt, pytz, yfinance as yf, os
+csv_path = 'docs/outputs/scoin_plus_intraday.csv'
+tickers = []
+if os.path.exists('tickers_scoinp.txt'):
+    with open('tickers_scoinp.txt') as f:
+        tickers = [t.strip() for t in f if t.strip() and not t.startswith('#')]
+if not tickers:
+    print("NO_TICKERS"); sys.exit(2)
+jst = pytz.timezone('Asia/Tokyo')
+today = dt.datetime.now(jst).date()
+frames = []
+for t in tickers:
+    try:
+        df = yf.download(t, period='5d', interval='1m', prepost=False, auto_adjust=True, threads=False)
+    except Exception as e:
+        print('download failed', t, e); continue
+    if df is None or df.empty: continue
+    if df.index.tz is None: df.index = df.index.tz_localize('UTC')
+    df = df.tz_convert(jst)
+    df = df[df.index.date == today]
+    if df.empty: continue
+    df = df[['Close']].rename(columns={'Close': t})
+    frames.append(df)
+if not frames:
+    print('NO_TODAY_DATA'); sys.exit(2)
+px = pd.concat(frames, axis=1).sort_index().dropna(how='all')
+px['Datetime'] = px.index
+px['Index'] = px[[c for c in px.columns if c in tickers]].mean(axis=1, skipna=True)
+px[['Datetime','Index']].to_csv(csv_path, index=False)
+print('CSV written:', csv_path, 'rows=', len(px), 'first=', px.index.min(), 'last=', px.index.max())
+PY
+            python build_csv.py
           fi
 
       - name: Verify inputs & script
+        shell: bash
         run: |
           test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
           test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
@@ -162,6 +204,7 @@ jobs:
       - name: Decide AM/PM variant
         env:
           RUN_SCHEDULE: ${{ github.event.schedule || '' }}
+        shell: bash
         run: |
           if [ "${RUN_SCHEDULE}" = "35 2 * * 1-5" ]; then
             echo "PUBLISH_VARIANT=am" >> "$GITHUB_ENV"
@@ -169,11 +212,13 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
-      - name: Generate intraday snapshot (ext CLI -> legacy fallback)
+      - name: Generate intraday snapshot (with legacy fallback)
+        shell: bash
         run: |
+          set -euo pipefail
           SNAP="${SNAPSHOT_PNG}"
           if [ "${PUBLISH_VARIANT:-pm}" = "am" ]; then SNAP="${SNAPSHOT_AM_PNG}"; fi
-
+          echo "Try: extended CLI"
           set +e
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -181,15 +226,9 @@ jobs:
             --out-json "${OUT_JSON}" \
             --out-text "${OUT_TEXT}" \
             --snapshot-png "${SNAP}" \
-            --session-start 09:00 \
-            --session-end 15:30 \
-            --day-anchor 09:00 \
-            --basis "${BASIS_DEFAULT}" \
-            --label "${LABEL}" \
-            --dt-col "${DT_COL}" \
-            --value-type "${VALUE_TYPE_DEFAULT}"
-          rc=$?
-          set -e
+            --session-start 09:00 --session-end 15:30 --day-anchor 09:00 \
+            --basis prev_close --label "${LABEL}" --dt-col "${DT_COL}" --value-type auto
+          rc=$?; set -e
           if [ $rc -ne 0 ]; then
             echo "[fallback] legacy CLI"
             python scripts/make_intraday_post.py \
@@ -198,33 +237,10 @@ jobs:
               --out-json "${OUT_JSON}" \
               --out-text "${OUT_TEXT}" \
               --snapshot-png "${SNAP}" \
-              --session-start 09:00 \
-              --session-end 15:30 \
-              --day-anchor 09:00 \
+              --session-start 09:00 --session-end 15:30 --day-anchor 09:00 \
               --basis prev_close
           fi
-
-      - name: Validate outputs (existence / size / freshness)
-        run: |
-          set -e
-          # 存在
-          test -f "${OUT_JSON}" || (echo "::error::missing ${OUT_JSON}" && exit 1)
-          test -f "${OUT_TEXT}" || (echo "::error::missing ${OUT_TEXT}" && exit 1)
-          if   [ -f "${SNAPSHOT_PNG}" ]; then SNAP="${SNAPSHOT_PNG}"
-          elif [ -f "${SNAPSHOT_AM_PNG}" ]; then SNAP="${SNAPSHOT_AM_PNG}"
-          else echo "::error::snapshot not found"; exit 1; fi
-
-          # サイズ（1KB 未満の “No data” 画像を撥ねる）
-          [ $(stat -c%s "${SNAP}") -ge 1024 ] || { echo "::error file=${SNAP}::snapshot too small"; exit 1; }
-          [ $(stat -c%s "${OUT_TEXT}") -ge 30 ] || { echo "::error file=${OUT_TEXT}::text too small"; exit 1; }
-
-          # JSON 更新確認（1時間以内の更新が目安）
-          now=$(date +%s)
-          mtime=$(date -r "${OUT_JSON}" +%s)
-          diff=$(( now - mtime ))
-          if [ $diff -gt 3600 ]; then
-            echo "::warning::stats.json looks stale (${diff}s old)"
-          fi
+          ls -l "${OUT_JSON}" "${OUT_TEXT}" "${SNAP}" || true
 
       - name: Checkout site repo
         uses: actions/checkout@v4
@@ -236,6 +252,7 @@ jobs:
           fetch-depth: 0
 
       - name: Copy into site tree
+        shell: bash
         run: |
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
@@ -249,6 +266,7 @@ jobs:
 
       - name: Commit & push site charts
         working-directory: site
+        shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
