@@ -11,9 +11,11 @@ S-COIN+（ほか汎用）用：日中スナップショット作成 & テキス�
 
 import argparse
 import json
+import shutil
 from dataclasses import dataclass
 from datetime import time
 from typing import Tuple, Optional
+from pathlib import Path
 
 import pandas as pd
 
@@ -241,7 +243,7 @@ def main():
         pct_for_color=pct_value,
     )
 
-    # テキスト
+    # テキスト（サイト側の正規化対応のため全角カッコでもOK）
     sign = "+" if pct_value >= 0 else ""
     now_jst = pd.Timestamp.now(tz=JST).strftime("%Y/%m/%d %H:%M")
     label_jp = ("prev_close" if basis_label == "prev_close" else basis_label)
@@ -250,8 +252,25 @@ def main():
         f"{sign}{pct_value:.2f}%（基準: {label_jp}）",
         "#S-COIN+ #日本株" if title_label.upper().startswith("S-COIN") else "#日本株",
     ]
-    with open(args.out_text, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    text_body = "\n".join(lines)
+
+    # 既存（従来名）の出力
+    out_text_path = Path(args.out_text)
+    out_text_path.write_text(text_body, encoding="utf-8")
+
+    # ── 追加：サイトが参照する “post_intraday” 名でも複製出力 ─────────────────
+    # S-COIN+ 系だけでOK（他指数は従来通り）
+    if args.index_key.lower().startswith(("scoin", "s-coin")):
+        out_dir = out_text_path.parent  # 通常 docs/outputs
+        # 公式想定の正規名
+        (out_dir / "scoin_plus_post_intraday.txt").write_text(text_body, encoding="utf-8")
+        # レガシー互換名（サイト側が候補として探しにいくため）
+        (out_dir / "s_coin__post_intraday.txt").write_text(text_body, encoding="utf-8")
+        # 念のため: もし runner が別名を渡してきても、明示的に上書きコピー
+        try:
+            shutil.copyfile(out_text_path, out_dir / "scoin_plus_post_intraday.txt")
+        except Exception:
+            pass
 
     # JSON
     payload = {
@@ -264,8 +283,7 @@ def main():
         # 将来のサイト側自動判定用に unit を明記（％）
         "unit": "percent",
     }
-    with open(args.out_json, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    Path(args.out_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
