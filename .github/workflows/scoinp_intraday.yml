@@ -80,7 +80,6 @@ jobs:
             echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
           fi
 
-      # ★ 引数をサポートされているものだけに修正
       - name: Generate intraday snapshot
         shell: bash
         run: |
@@ -97,7 +96,7 @@ jobs:
             --session-start 09:00 \
             --session-end 15:30 \
             --day-anchor 09:00 \
-            --basis prev_close
+            --basis open@09:00   # ← ここを prev_close から変更
 
           test -s "${OUT_JSON}"
           test -s "${OUT_TEXT}"
