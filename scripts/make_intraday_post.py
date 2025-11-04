@@ -23,6 +23,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 JST = "Asia/Tokyo"
 
@@ -72,12 +73,9 @@ def resolve_value_column(df: pd.DataFrame, index_key: str) -> str:
 def to_jst(df: pd.DataFrame) -> pd.DataFrame:
     """Datetime列をUTCとして解釈→JSTへ変換し、DatetimeIndexにして返す。"""
     ts = pd.to_datetime(df["Datetime"], errors="coerce", utc=True)
-    # 万一すべてNaTなら（タイムゾーン情報なし）UTCとしてローカライズしてからJSTへ
     if ts.isna().all():
         ts = pd.to_datetime(df["Datetime"], errors="coerce").dt.tz_localize("UTC")
-    # Series は .dt アクセサで tz_convert
     ts = ts.dt.tz_convert(JST)
-
     out = df.copy()
     out["Datetime"] = ts
     out = out.set_index("Datetime").sort_index()
@@ -130,7 +128,6 @@ def compute_pct(df_jst: pd.DataFrame, col: str, basis: str, day_anchor: str) -> 
             raise ValueError("アンカー時刻の値が取得できませんでした。")
         return latest - av, f"open@{hhmm}"
 
-    # 不明な指定は prev_close にフォールバック
     return latest, "prev_close"
 
 
@@ -148,44 +145,48 @@ def make_plot(
     title_label: str,
     pct_for_color: float,
 ):
-    # 黒ベース
     plt.close("all")
     fig, ax = plt.subplots(figsize=(12, 6), facecolor="#0b0b0b")
     ax.set_facecolor("#0b0b0b")
 
-    # 騰落率に応じた線色
     line_color = pick_line_color(pct_for_color)
-
     ax.plot(pct_series.index, pct_series.values, linewidth=2.0, color=line_color, label=title_label)
 
-    # 枠線消し
+    ax.axhline(0, color="#8a8f98", linewidth=0.9, linestyle="--", alpha=0.8, zorder=0)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y:.1f}%"))
+
+    y_min = float(pd.Series(pct_series.values).min())
+    y_max = float(pd.Series(pct_series.values).max())
+    if y_min == y_max:
+        pad = max(0.5, abs(y_min) * 0.2)
+        y_min, y_max = y_min - pad, y_max + pad
+    else:
+        pad = (y_max - y_min) * 0.15
+        y_min, y_max = y_min - pad, y_max + pad
+    y_min = min(y_min, 0.0)
+    y_max = max(y_max, 0.0)
+    ax.set_ylim(y_min, y_max)
+
     for sp in ax.spines.values():
         sp.set_visible(False)
 
-    # 目盛とラベル色
     ax.tick_params(colors="#cfcfcf")
     ax.yaxis.label.set_color("#cfcfcf")
     ax.xaxis.label.set_color("#cfcfcf")
 
-    # 軸ラベル
     y_label = "Change vs Anchor (%)" if basis_label.startswith("open@") else "Change vs Prev Close (%)"
     ax.set_ylabel(y_label)
     ax.set_xlabel("Time (JST)")
 
-    # タイトル
     ts = pd.Timestamp.now(tz=JST).strftime("%Y/%m/%d %H:%M")
     ax.set_title(f"{title_label} Intraday Snapshot ({ts})", color="#ffffff", fontsize=14)
 
-    # グリッド（控えめ）
     ax.grid(True, color="#334", linestyle=":", linewidth=0.6, alpha=0.7)
-
-    # 凡例
     leg = ax.legend(facecolor="#111a24", edgecolor="none", labelcolor="#eaeaea")
     for t in leg.get_texts():
         t.set_color("#eaeaea")
 
     fig.tight_layout()
-    # 背景色固定保存
     fig.savefig(out_png, dpi=130, facecolor=fig.get_facecolor())
     plt.close(fig)
 
@@ -197,13 +198,12 @@ def main():
     p.add_argument("--out-json", required=True)
     p.add_argument("--out-text", required=True)
     p.add_argument("--snapshot-png", required=True)
-    p.add_argument("--session-start", required=True)  # "09:00"
-    p.add_argument("--session-end", required=True)    # "15:30"
-    p.add_argument("--day-anchor", required=True)     # "09:00"
-    p.add_argument("--basis", required=True)          # "prev_close" or "open@HH:MM"
+    p.add_argument("--session-start", required=True)
+    p.add_argument("--session-end", required=True)
+    p.add_argument("--day-anchor", required=True)
+    p.add_argument("--basis", required=True)
     args = p.parse_args()
 
-    # 読み込み
     raw = pd.read_csv(args.csv)
     if "Datetime" not in raw.columns:
         raise ValueError("CSVに 'Datetime' 列が必要です。")
@@ -211,14 +211,11 @@ def main():
     value_col = resolve_value_column(raw, args.index_key)
     df_jst = to_jst(raw[["Datetime", value_col]])
 
-    # セッション抽出（JST）
     sess = Session(args.session_start, args.session_end)
     df_sess = filter_session(df_jst, sess)
 
-    # 値の計算（％）
     pct_value, basis_label = compute_pct(df_sess, value_col, args.basis, args.day_anchor)
 
-    # プロット用系列
     if basis_label == "prev_close":
         plot_series = df_sess[value_col]
         title_label = "S-COIN+" if args.index_key.lower().startswith("scoin") else args.index_key
@@ -232,7 +229,6 @@ def main():
         plot_series = df_sess[value_col] - av
         title_label = "S-COIN+"
 
-    # 図を保存（線色は pct_value の正負で決定）
     make_plot(
         df_sess,
         value_col,
@@ -240,10 +236,9 @@ def main():
         plot_series,
         args.snapshot_png,
         title_label,
-        pct_for_color=pct_value,
+        pct_for_color=pct_value,  # ← 戻した：現在の騰落率で色判定
     )
 
-    # テキスト（サイト側の正規化対応のため全角カッコでもOK）
     sign = "+" if pct_value >= 0 else ""
     now_jst = pd.Timestamp.now(tz=JST).strftime("%Y/%m/%d %H:%M")
     label_jp = ("prev_close" if basis_label == "prev_close" else basis_label)
@@ -254,25 +249,18 @@ def main():
     ]
     text_body = "\n".join(lines)
 
-    # 既存（従来名）の出力
     out_text_path = Path(args.out_text)
     out_text_path.write_text(text_body, encoding="utf-8")
 
-    # ── 追加：サイトが参照する “post_intraday” 名でも複製出力 ─────────────────
-    # S-COIN+ 系だけでOK（他指数は従来通り）
     if args.index_key.lower().startswith(("scoin", "s-coin")):
-        out_dir = out_text_path.parent  # 通常 docs/outputs
-        # 公式想定の正規名
+        out_dir = out_text_path.parent
         (out_dir / "scoin_plus_post_intraday.txt").write_text(text_body, encoding="utf-8")
-        # レガシー互換名（サイト側が候補として探しにいくため）
         (out_dir / "s_coin__post_intraday.txt").write_text(text_body, encoding="utf-8")
-        # 念のため: もし runner が別名を渡してきても、明示的に上書きコピー
         try:
             shutil.copyfile(out_text_path, out_dir / "scoin_plus_post_intraday.txt")
         except Exception:
             pass
 
-    # JSON
     payload = {
         "index_key": args.index_key.upper() if args.index_key.lower().startswith("scoin") else args.index_key,
         "label": title_label.upper() if title_label else title_label,
@@ -280,7 +268,6 @@ def main():
         "basis": basis_label,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
         "updated_at": pd.Timestamp.now(tz=JST).isoformat(),
-        # 将来のサイト側自動判定用に unit を明記（％）
         "unit": "percent",
     }
     Path(args.out_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
