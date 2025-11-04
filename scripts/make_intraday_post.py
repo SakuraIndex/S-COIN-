@@ -23,7 +23,6 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 
 JST = "Asia/Tokyo"
 
@@ -157,25 +156,7 @@ def make_plot(
     # 騰落率に応じた線色
     line_color = pick_line_color(pct_for_color)
 
-    # 折れ線
     ax.plot(pct_series.index, pct_series.values, linewidth=2.0, color=line_color, label=title_label)
-
-    # === 視覚明確化 ===
-    ax.axhline(0, color="#8a8f98", linewidth=0.9, linestyle="--", alpha=0.8, zorder=0)
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y:.1f}%"))
-
-    y_min = float(pd.Series(pct_series.values).min())
-    y_max = float(pd.Series(pct_series.values).max())
-    if y_min == y_max:
-        pad = max(0.5, abs(y_min) * 0.2)
-        y_min, y_max = y_min - pad, y_max + pad
-    else:
-        pad = (y_max - y_min) * 0.15
-        y_min, y_max = y_min - pad, y_max + pad
-    y_min = min(y_min, 0.0)
-    y_max = max(y_max, 0.0)
-    ax.set_ylim(y_min, y_max)
-    # === /視覚明確化 ===
 
     # 枠線消し
     for sp in ax.spines.values():
@@ -204,6 +185,7 @@ def make_plot(
         t.set_color("#eaeaea")
 
     fig.tight_layout()
+    # 背景色固定保存
     fig.savefig(out_png, dpi=130, facecolor=fig.get_facecolor())
     plt.close(fig)
 
@@ -250,10 +232,7 @@ def main():
         plot_series = df_sess[value_col] - av
         title_label = "S-COIN+"
 
-    # 線色の判定は「前日終値比（絶対％）」で行う
-    color_by_prevclose = float(df_sess[value_col].iloc[-1])
-
-    # 図を保存
+    # 図を保存（線色は pct_value の正負で決定）
     make_plot(
         df_sess,
         value_col,
@@ -261,7 +240,7 @@ def main():
         plot_series,
         args.snapshot_png,
         title_label,
-        pct_for_color=color_by_prevclose,  # ← 色は前日比で判定
+        pct_for_color=pct_value,
     )
 
     # テキスト（サイト側の正規化対応のため全角カッコでもOK）
@@ -280,10 +259,14 @@ def main():
     out_text_path.write_text(text_body, encoding="utf-8")
 
     # ── 追加：サイトが参照する “post_intraday” 名でも複製出力 ─────────────────
+    # S-COIN+ 系だけでOK（他指数は従来通り）
     if args.index_key.lower().startswith(("scoin", "s-coin")):
         out_dir = out_text_path.parent  # 通常 docs/outputs
+        # 公式想定の正規名
         (out_dir / "scoin_plus_post_intraday.txt").write_text(text_body, encoding="utf-8")
+        # レガシー互換名（サイト側が候補として探しにいくため）
         (out_dir / "s_coin__post_intraday.txt").write_text(text_body, encoding="utf-8")
+        # 念のため: もし runner が別名を渡してきても、明示的に上書きコピー
         try:
             shutil.copyfile(out_text_path, out_dir / "scoin_plus_post_intraday.txt")
         except Exception:
@@ -297,6 +280,7 @@ def main():
         "basis": basis_label,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
         "updated_at": pd.Timestamp.now(tz=JST).isoformat(),
+        # 将来のサイト側自動判定用に unit を明記（％）
         "unit": "percent",
     }
     Path(args.out_json).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
