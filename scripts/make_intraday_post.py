@@ -23,6 +23,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 JST = "Asia/Tokyo"
 
@@ -156,7 +157,33 @@ def make_plot(
     # 騰落率に応じた線色
     line_color = pick_line_color(pct_for_color)
 
+    # 折れ線
     ax.plot(pct_series.index, pct_series.values, linewidth=2.0, color=line_color, label=title_label)
+
+    # === ここから視覚明確化の追加 ===
+
+    # 0%の基準線（マイナス圏での戻りを誤読しにくく）
+    ax.axhline(0, color="#8a8f98", linewidth=0.9, linestyle="--", alpha=0.8, zorder=0)
+
+    # 縦軸を%表記（データはすでに%値なのでスケールせずサフィックスだけ）
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"{y:.1f}%"))
+
+    # 表示範囲：データのmin/maxから余白を取り、必ず0を範囲内に含める
+    y_min = float(pd.Series(pct_series.values).min())
+    y_max = float(pd.Series(pct_series.values).max())
+    if y_min == y_max:
+        pad = max(0.5, abs(y_min) * 0.2)  # 退避
+        y_min, y_max = y_min - pad, y_max + pad
+    else:
+        pad = (y_max - y_min) * 0.15
+        y_min, y_max = y_min - pad, y_max + pad
+
+    # 0 を必ず含む（マイナス圏やプラス圏に寄り過ぎていても0基準が見える）
+    y_min = min(y_min, 0.0)
+    y_max = max(y_max, 0.0)
+    ax.set_ylim(y_min, y_max)
+
+    # === ここまで追加 ===
 
     # 枠線消し
     for sp in ax.spines.values():
