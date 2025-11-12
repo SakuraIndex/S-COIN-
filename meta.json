@@ -1,23 +1,22 @@
 {
-  "index_key": "S_COIN_PLUS",
+  "index_key": "scoin_plus",
   "label": "S-COIN+",
   "category": "暗号資産関連（日本株）",
-  "description": "国内の暗号資産／ブロックチェーン関連の感応度が高い銘柄群を等ウェイトで集約した短期モメンタム観測用指数。",
-  "methodology": {
-    "universe": "日本株のうち暗号資産・ブロックチェーン事業または関連収益感応度が高い企業",
-    "weighting": "等ウェイト",
-    "calc_basis": "prev_close（前日終値比, ％）",
-    "intraday_source": "各構成銘柄の短期足（推奨5分）",
-    "rebalancing": "随時（感応度の変化・上場動向・流動性を考慮）",
-    "notes": "指数の性質上ボラティリティ高。可視化は±25%でクリップ。"
+  "description": "国内の暗号資産／ブロックチェーン関連銘柄のうち、感応度と流動性が高い企業群を等ウェイトで合成した短期モメンタム観測用指数。日中は前日終値比（％）を可視化。",
+  "method": {
+    "weighting": "equal",
+    "rebalancing": "quarterly",
+    "calc": "prev_close (%)",
+    "notes": "可視化は±25%でクリップ。銘柄構成は暗号資産関連性と流動性スコアをもとに選定。"
   },
-  "constituents_file": "docs/tickers_scoin_plus.txt",
-  "constituents": [
+  "components": [
+    { "ticker": "6574.T", "name": "コンヴァノ" },
+    { "ticker": "5721.T", "name": "エス・サイエンス" },
     { "ticker": "3825.T", "name": "リミックスポイント" },
-    { "ticker": "3350.T", "name": "メタプラネット" },
-    { "ticker": "8105.T", "name": "Bitcoin Japan（推定）" },
-    { "ticker": "4833.T", "name": "Ｄｅｆ Ｃｏｎｓｕｌｔｉｎｇ" },
-    { "ticker": "8698.T", "name": "マネックスグループ" },
-    { "ticker": "9449.T", "name": "GMOインターネット" }
+    { "ticker": "3850.T", "name": "メタプラネット" },
+    { "ticker": "8105.T", "name": "Bitcoin Japan" },
+    { "ticker": "4833.T", "name": "Def Consulting" },
+    { "ticker": "2334.T", "name": "イオレ" },
+    { "ticker": "8783.T", "name": "abc" }
   ]
 }
